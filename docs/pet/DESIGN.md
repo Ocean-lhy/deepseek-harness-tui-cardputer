@@ -1,9 +1,17 @@
-# Cardputer Zero DSH 桌宠「大肥鱼」开发设计（交接给实现阶段）
+# Cardputer Zero DSH 桌宠「大肥鱼」开发设计
 
-状态：设计稿，供后续实现与验收使用。本文只描述方案；除 `tools/sim/pet_mockup.py`
-（离屏 mockup 工具）和 `docs/pet/layout-mockups.png`（预览图）外，本分支不改任何产品代码。
+状态：用户已确认四项选择，第二阶段已按该选择实现。§0 前三条是**当时的推荐**，
+其中「像素鲸鱼本体」已被用户否决。以本节和 §8 为准。
+`docs/pet/layout-mockups.png` 是第一阶段的方案对比图，不是现在的运行画面。
 
-阅读顺序：§0 结论 → §7 待确认问题 → §5 分阶段任务。§1–§4 是依据与细节。
+用户确认：
+
+1. 形象是**鲸鱼娘**（有头发、脸、衣服和鲸尾的女孩），不是鲸鱼本体。参考仓立绘的再分发依据不明确，**不打包、不提交那些 webp**。内置的是本仓原创 28×32 像素女孩；用户自有素材走 `~/.dst/pet-pack/`。
+2. 像素为主。没有可用面板、也没有离屏输出时，回落字符立绘。
+3. 接受右侧宠物栏。正文 53 列缩到 43 列。`/pet dock off` 或 `/pet off` 恢复 53 列。默认**关闭**，所以旧配置和现有场景保持 53 列。
+4. 首版是互动、养成、设备上能触发的成就、JSON/`WM1` 导入导出。小游戏、天气、余额、节日换装、台词库后置。
+
+阅读顺序：上面的确认 → §8 实现记录 → §0 里仍然有效的架构判断。
 
 ---
 
@@ -506,12 +514,60 @@ DSH 事件来自 `harness::Ev`；存档格式兼容参考仓 schema v1 / `WM1`�
 | RGB565 字节序/stride 与假设不同 | 颜色错、图像错位 | 读 `stride`；`pet.render: pixel` 下提供 `--pet-preview` 真机测试图 |
 | 正文 43 列影响长代码/表格可读性 | 体验下降 | `dock: off`；artifact/menus 仍全宽 |
 | 300 ms tick 使动画较慢（dsh-ui-whale 是 120 ms） | 动作偏卡 | 首版接受；若真机需要更顺滑，再评估把空闲 poll 改为 150 ms 的 CPU 代价 |
-| 参考仓立绘为 AI 生成，授权链只有作者 MIT 声明 | 再分发风险 | 首版不使用；可选皮肤前由用户确认 |
+| 参考仓立绘再分发依据不明确 | 不能把 webp 放进本仓 | 已执行：不打包、不提交。内置原创像素女孩，用户自有素材走资源包。见 §10 |
 | 并行测试偶发失败（既有） | 误判回归 | 验收以 `--test-threads=1` 为准，并单独记录该既有用例 |
 
 ---
 
-## 9. 复现本文预览图
+## 10. 第二阶段实现记录
+
+本节覆盖 §0 里「像素鲸鱼本体」的推荐。用户要的是鲸鱼娘，实现按这个做。
+
+### 10.1 立绘许可（证据与未决）
+
+查过的是 `Ocean-lhy/dsh-whale-musume` @ `6e77caed46da3629921b6a4b2b7dacb0838b36b6`
+（fork 自 `Sutera-Diffusus/dsh-whale-musume`，功能提交 `3928dfa`）：
+
+- `LICENSE` 是 MIT 模板，许可对象写的是 “this software and associated documentation files”，版权人 Sutera-Diffusus。
+- `package.json` 的 `license` 是 `MIT`，`files` 白名单包含 `assets/generated`。
+- 仓库里没有单独的图片许可、没有把图片排除在外的声明、也没有生成器条款文件。
+- `scripts/gen-assets.py` 调用 `gpt-image-2`，默认端点 `https://free.quanthatch.com/c2a/v1`，密钥环境变量 `DSH_JMRAI_API_KEY`。92 张 webp 都是 512×512。
+
+因此：**不能从「代码是 MIT」推出「图片可以再分发」**。生成器条款不在仓库里，本次也没有向作者取得授权，所以既不能说已经获准，也不能仅凭「是 AI 生成的」断定可以或不可以商用。这些图片没有放进本仓。
+
+内置 28×32 像素女孩是本仓为这个设备画的，随 `dst` 的 GPL-3.0 一起分发。模拟器截图用的 X11 6×13 字体是公有领域。启动动画里的字符鲸仍是原来的 dsh-TUI / dsh-ui-whale 素材，不是这只宠物。
+
+### 10.2 实际接上的行为
+
+- 默认 `pet.enabled: false`。`/pet on` 才出现宠物，并写回 `~/.dst/config.yml`。
+- 像素：探测到合格面板，或设置了 `DST_PET_FB_OUT`。探测顺序是显式路径（`DST_FB` 或 `pet.fb`，仍必须 16bpp、320×170）→ `/dev/fb_lcd` → `/dev/fb_panel` → 名称像 st7789/mipi/panel 的节点。写之前还要求祖先进程里有 `fbterm`，或 `DST_PET_FB_FORCE=1`，或路径是用户显式指定的。对不上的设备不打开。
+- 侧栏占第 43–52 列、上面 10 行（60×140）。这些行不发清到行尾。正文在写入时按 43 列折行。菜单、审批、提问、二维码、artifact 仍是全宽，并且不往面板上画宠物。
+- 空闲且 `pet.room` 开着时，像素房间盖住启动画面；字符模式则换成字符女孩。进入对话后改为侧栏。
+- 姿态来自 `harness::Ev`：思考、流式回复、工具（`state_report` 不计）、失败、压缩、回合结束、Esc、空闲 10 秒睡觉。姿态至少保持 600 ms，更高优先级可以打断。
+- `/pet pat|feed|praise`，三次摸头在 3 秒内记为一次三连。数值和 45 个成就 ID 对齐参考仓；设备上会触发其中 29 个。小游戏、任务、周签、关键词、余额相关的 ID 只保留、不在设备上触发。
+- 存档 `~/.dst/pet.json`（`dst-pet/save`，mode 600）。导出是参考仓的 `dsh-whale-musume/save` v1 和 `WM1` 迁移码。导入会丢掉未知成就、拒绝坏校验，并原样留下 quests/week/game/journal/usage 里认得出的 JSON。不读写 API key、dsh token、聊天正文或工具参数。
+- 资源包：`~/.dst/pet-pack/<pose>.ppm`，必须有 `idle.ppm`。品红 `#FF00FF` 透明。见 `docs/pet/PACK.md`。
+- 零新增 crate。
+- `dst --pet-preview sheet <目录>` 走同一套 `pet_art::render`。模拟器在 `DST_PET_FB_OUT` 指向的 PPM 上把品红当透明叠到文字画面上。
+
+### 10.3 还没做
+
+小游戏、天气、余额、节日换装、530 条台词、TTS、关键词感知、把参考仓 webp 内置进来。真机上的闪烁、字节序和 `/dev/fb_lcd` 与 `/dev/fb_panel` 哪一个才是这块屏，都还没有设备可以验证。
+
+### 10.4 离屏画面
+
+`docs/pet/preview/` 里的 PNG 来自 debug 构建的生产渲染路径（`dst --pet-preview` 和 `DST_PET_FB_OUT` 叠到 `screen_sim.py`），不是 `pet_mockup.py`，也不是真机。生成命令：
+
+```bash
+cargo build --bin dst
+PET_PREVIEW_OUT=/tmp/pet-preview python3 tools/sim/make_pet_preview.py
+```
+
+脚本自己设置 `DST_NO_UPDATE_CHECK=1`。文件：`contact.png`（姿态帧）、`room-idle.png` / `room-sleep.png`、`dock-tool.png`、`sim-idle-room.png`、`sim-working.png`（bash 工具卡旁的侧栏）、`sim-pat.png`、`sim-dock-off.png`（53 列）、`sim-text-room.png`（字符兜底）。
+
+## 附录. 复现第一阶段的方案对比图
+
+下面这张图是鲸鱼本体方案的示意图，不是 §10 的运行画面。运行画面用 `dst --pet-preview` 和 `tools/sim/make_pet_preview.py`。
 
 ```bash
 # 主仓根目录；需要 python3 + pyte + Pillow（pip install pyte pillow）

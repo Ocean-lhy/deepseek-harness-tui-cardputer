@@ -161,6 +161,12 @@ pub const COMMANDS: &[Command] = &[
         description: "exit dst",
         input_hint: None,
     },
+    Command {
+        name: "pet",
+        category: "cat_core",
+        description: "whale-girl desk pet",
+        input_hint: Some("[on|off|dock|room|pat|feed|praise|stats|export|import|pack]"),
+    },
 ];
 
 /// Commands matching what has been typed after `/` (before any space).
@@ -235,6 +241,7 @@ pub const IMMEDIATE_WHILE_BUSY: &[&str] = &[
     "update-hwinfo",
     "goal",
     "quit",
+    "pet",
 ];
 
 /// Canonical command name for a typed `/` line, aliases included. `None` when
@@ -300,6 +307,8 @@ pub struct Outcome {
     /// Check for a self-update; `Some(channel)` switches the channel first,
     /// `Some("")` keeps the configured one (/update [nightly|stable]).
     pub update: Option<String>,
+    /// Raw `/pet` argument. Empty string opens the pet menu.
+    pub pet: Option<String>,
 }
 
 impl Outcome {
@@ -322,6 +331,7 @@ impl Outcome {
             image_clear: false,
             btw: None,
             update: None,
+            pet: None,
             compact: false,
         }
     }
@@ -344,6 +354,7 @@ impl Outcome {
             image_clear: false,
             btw: None,
             update: None,
+            pet: None,
             compact: false,
         }
     }
@@ -374,6 +385,12 @@ pub fn evaluate(input: &str, cfg: &mut Config, persist: bool) -> Option<Outcome>
     let name = name.to_ascii_lowercase();
 
     let out = match name.as_str() {
+        "pet" => {
+            let mut o = Outcome::text("", KIND_DIM);
+            o.lines.clear();
+            o.pet = Some(arg.to_string());
+            o
+        }
         "help" | "?" => Outcome {
             lines: Vec::new(),
             quit: false,
@@ -393,6 +410,7 @@ pub fn evaluate(input: &str, cfg: &mut Config, persist: bool) -> Option<Outcome>
             image_clear: false,
             btw: None,
             update: None,
+            pet: None,
         },
         "model" => {
             if arg.is_empty() {
@@ -414,6 +432,7 @@ pub fn evaluate(input: &str, cfg: &mut Config, persist: bool) -> Option<Outcome>
             image_clear: false,
             btw: None,
             update: None,
+            pet: None,
                     compact: false,
                 }
             } else if arg.len() > 120 {
@@ -599,6 +618,7 @@ pub fn evaluate(input: &str, cfg: &mut Config, persist: bool) -> Option<Outcome>
             image_clear: false,
             btw: None,
             update: None,
+            pet: None,
                     compact: false,
                 }
             }
@@ -615,6 +635,7 @@ pub fn evaluate(input: &str, cfg: &mut Config, persist: bool) -> Option<Outcome>
             image_clear: false,
             btw: None,
             update: None,
+            pet: None,
         },
         "extensions" => Outcome {
             lines: Vec::new(), quit: false, clear: false, login: false,
@@ -627,6 +648,7 @@ pub fn evaluate(input: &str, cfg: &mut Config, persist: bool) -> Option<Outcome>
             image_clear: false,
             btw: None,
             update: None,
+            pet: None,
         },
         "rename" => {
             if arg.is_empty() {
@@ -656,6 +678,7 @@ pub fn evaluate(input: &str, cfg: &mut Config, persist: bool) -> Option<Outcome>
             image_clear: false,
             btw: None,
             update: None,
+            pet: None,
             compact: true,
         },
         "goal" => {
@@ -738,6 +761,7 @@ pub fn evaluate(input: &str, cfg: &mut Config, persist: bool) -> Option<Outcome>
                             image_clear: false,
                             btw: None,
                             update: None,
+                            pet: None,
                             compact: false,
                         },
                     }
@@ -766,6 +790,7 @@ pub fn evaluate(input: &str, cfg: &mut Config, persist: bool) -> Option<Outcome>
             image_clear: false,
             btw: None,
             update: None,
+            pet: None,
                     compact: false,
                 }
             }
@@ -788,6 +813,7 @@ pub fn evaluate(input: &str, cfg: &mut Config, persist: bool) -> Option<Outcome>
             image_clear: false,
             btw: None,
             update: None,
+            pet: None,
             compact: false,
         },
         "quit" | "exit" | "q" => Outcome {
@@ -808,6 +834,7 @@ pub fn evaluate(input: &str, cfg: &mut Config, persist: bool) -> Option<Outcome>
             image_clear: false,
             btw: None,
             update: None,
+            pet: None,
             compact: false,
         },
         "" => usage("/"),

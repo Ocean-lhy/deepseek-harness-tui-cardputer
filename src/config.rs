@@ -597,6 +597,16 @@ pub struct Config {
     /// Self-update channel: `nightly` (rolling commit builds) or `stable`
     /// (newest versioned release). Default `nightly`.
     pub update_channel: String,
+    /// Whale-girl desk pet. Off unless the key is set, so an old config keeps
+    /// the 53-column transcript.
+    pub pet_enabled: bool,
+    pub pet_dock: bool,
+    pub pet_room: bool,
+    /// `auto` (pixel when a panel or offscreen sink exists), `pixel`, `text`.
+    pub pet_render: String,
+    /// Explicit framebuffer path. Empty means probe `/dev/fb_lcd` then
+    /// `/dev/fb_panel`. `DST_FB` overrides this at runtime and is not saved.
+    pub pet_fb: String,
 }
 
 impl Default for Config {
@@ -637,6 +647,11 @@ impl Default for Config {
             creator: false,
             configured: false,
             update_channel: "nightly".into(),
+            pet_enabled: false,
+            pet_dock: true,
+            pet_room: true,
+            pet_render: "auto".into(),
+            pet_fb: String::new(),
         }
     }
 }
@@ -810,6 +825,25 @@ impl Config {
                 self.sandbox_judge_max_tokens = v.max(8.0) as u32;
             }
         }
+        if let Some(pet) = doc.get("pet") {
+            if let Some(v) = pet.get("enabled").and_then(|v| v.as_bool()) {
+                self.pet_enabled = v;
+            }
+            if let Some(v) = pet.get("dock").and_then(|v| v.as_bool()) {
+                self.pet_dock = v;
+            }
+            if let Some(v) = pet.get("room").and_then(|v| v.as_bool()) {
+                self.pet_room = v;
+            }
+            if let Some(v) = pet.get("render").and_then(|v| v.as_str()) {
+                if matches!(v, "auto" | "pixel" | "text") {
+                    self.pet_render = v.to_string();
+                }
+            }
+            if let Some(v) = pet.get("fb").and_then(|v| v.as_str()) {
+                self.pet_fb = v.to_string();
+            }
+        }
         if let Some(ctx) = doc.get("context") {
             if let Some(v) = ctx.get("time").and_then(|v| v.as_bool()) {
                 self.context_time = v;
@@ -912,6 +946,14 @@ impl Config {
         s.push_str("context:\n");
         s.push_str(&format!("  time: {}\n", self.context_time));
         s.push_str(&format!("  time_refresh_secs: {}\n", self.context_refresh_secs));
+        s.push_str("pet:\n");
+        s.push_str(&format!("  enabled: {}\n", self.pet_enabled));
+        s.push_str(&format!("  dock: {}\n", self.pet_dock));
+        s.push_str(&format!("  room: {}\n", self.pet_room));
+        s.push_str(&format!("  render: {}\n", yaml_quote(&self.pet_render)));
+        if !self.pet_fb.is_empty() {
+            s.push_str(&format!("  fb: {}\n", yaml_quote(&self.pet_fb)));
+        }
         if !self.disabled_tools.is_empty() || !self.tool_config.is_empty() {
             s.push_str("insert:\n");
             for t in &self.disabled_tools {

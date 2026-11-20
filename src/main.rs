@@ -23,8 +23,13 @@ mod config;
 mod dsh_login;
 mod context;
 mod goal;
+mod fb;
 mod harness;
 mod hwinfo;
+mod pet;
+mod pet_art;
+mod pet_growth;
+mod pet_ui;
 mod i18n;
 mod instructions;
 mod jobs;
@@ -162,6 +167,8 @@ pub struct Scr {
     /// Draft preserved while browsing history.
     hist_draft: String,
     on_tick: Option<Box<dyn FnMut(&mut Scr)>>,
+    /// Whale-girl session. Absent in unit tests that build a bare screen.
+    pet: Option<pet_ui::PetHandle>,
 }
 
 /// One recorded tool call for the CtrlO viewer: the expanded arguments and the
@@ -376,7 +383,71 @@ impl Scr {
             hist_pos: None,
             hist_draft: String::new(),
             on_tick: None,
+            pet: None,
         }
+    }
+
+    /// Columns the transcript may use. 0 from the pet means "no dock".
+    fn dock_columns(&self) -> usize {
+        let full = self.cols.min(PANEL_COLS);
+        let Some(pet) = &self.pet else { return 0 };
+        let mut host = pet.borrow_mut();
+        host.follow(self.art_on && !self.splash_done);
+        host.dock_width(full)
+    }
+
+    fn transcript_width(&self) -> usize {
+        let dock = self.dock_columns();
+        if dock > 0 { dock } else { self.cols.min(PANEL_COLS) }
+    }
+
+    /// Finish a row. Dock rows are padded to the text width and not cleared
+    /// to the edge, so the framebuffer pet in columns 43–52 is left alone.
+    fn end_row(&self, s: &mut String, text: &str, dock_w: usize) {
+        if dock_w > 0 {
+            let fitted = fit(text, dock_w);
+            let pad = dock_w.saturating_sub(dw(&fitted));
+            s.push_str(&fitted);
+            s.push_str(&" ".repeat(pad));
+            s.push_str("\x1b[0m\r\n");
+        } else {
+            s.push_str(text);
+            s.push_str("\x1b[0m\x1b[K\r\n");
+        }
+    }
+
+    /// While the opening splash is up, the idle room replaces the character
+    /// whale. Returns true when it drew a frame and the whale animation
+    /// should stay put.
+    fn pet_idle_frame(&mut self) -> bool {
+        if !self.art_on || self.splash_done || self.lines.len() < 9 {
+            return false;
+        }
+        let Some(pet) = self.pet.clone() else { return false };
+        // Own the decision before touching `self`: the face borrows the host.
+        let face = {
+            let mut host = pet.borrow_mut();
+            match host.idle_face() {
+                pet_ui::IdleFace::Hidden => None,
+                pet_ui::IdleFace::Pixel => Some(Vec::new()),
+                pet_ui::IdleFace::Text(rows) => {
+                    Some(rows.iter().take(9).map(|r| (*r).to_string()).collect())
+                }
+            }
+        };
+        let Some(rows) = face else { return false };
+        if rows.is_empty() {
+            for i in 0..9 {
+                let text = if i == 8 { i18n::t("pet_room_hint").to_string() } else { String::new() };
+                self.lines[i] = (text, K_DIM);
+            }
+        } else {
+            for (i, row) in rows.into_iter().enumerate() {
+                self.lines[i] = (row, K_ART);
+            }
+        }
+        self.draw();
+        true
     }
 
     fn cw(c: char) -> usize {
@@ -504,7 +575,7 @@ impl Scr {
         Self::wrap_into(
             &mut wrapped,
             &format!("{STATE_ICON} {text}"),
-            self.cols.min(PANEL_COLS),
+            self.transcript_width(),
         );
         for w in wrapped {
             self.lines.push((w, K_STATE));
@@ -544,6 +615,7 @@ impl Scr {
         self.lines.push((splash_hint(model, self.cols), K_DIM));
         self.art_on = true;
         self.draw();
+        self.pet_idle_frame();
     }
 
     /// Advance the splash animation while the user has not started working.
@@ -553,6 +625,9 @@ impl Scr {
     /// one swap per 0.6-1.8 s while motion frames swap every 0.3 s; the
     /// top-of-loop `draw()` repaints the unchanged frame in between.
     fn anim_tick(&mut self) {
+        if self.pet_idle_frame() {
+            return;
+        }
         if !self.art_on
             || !self.input.is_empty()
             || self.scroll != 0
@@ -578,7 +653,7 @@ impl Scr {
         // committed to the log when the turn ends (Ev::TurnEnd) or on /clear.
         let mut wrapped = Vec::new();
         let shown = tidy(text);
-        Self::wrap_into(&mut wrapped, &shown, self.cols.min(PANEL_COLS));
+        Self::wrap_into(&mut wrapped, &shown, self.transcript_width());
         for w in wrapped {
             self.lines.push((w, kind));
         }
@@ -635,14 +710,15 @@ impl Scr {
         let mut s = String::with_capacity(4096);
         s.push_str("\x1b[?25l");
         s.push_str("\x1b[H");
+        let dock_w = self.dock_columns();
 
         // ---- pinned progress row (`state_report`) ----
         // It owns the top row for as long as it is the newest activity, so the
         // user always sees the current stage without hunting in the log.
         if let Some(text) = &self.state_line {
             s.push_str("\x1b[1;35m");
-            s.push_str(&fit(&format!("{STATE_ICON} {text}"), self.cols));
-            s.push_str("\x1b[0m\x1b[K\r\n");
+            let width = if dock_w > 0 { dock_w } else { self.cols };
+            self.end_row(&mut s, &fit(&format!("{STATE_ICON} {text}"), width), dock_w);
         }
 
         // Layout: [state(0/1)] + transcript + palette + live(1) + input(1).
@@ -682,17 +758,25 @@ impl Scr {
                     K_HEAD => s.push_str("\x1b[1;37m"),
                     _ => s.push_str("\x1b[0m"),
                 }
+                if dock_w > 0 {
+                    self.end_row(&mut s, txt, dock_w);
+                    continue;
+                }
                 s.push_str(txt);
             }
-            s.push_str("\x1b[0m\x1b[K\r\n");
+            if dock_w > 0 {
+                self.end_row(&mut s, "", dock_w);
+            } else {
+                s.push_str("\x1b[0m\x1b[K\r\n");
+            }
         }
 
         // ---- live reasoning (folded once the answer begins) ----
         if think_rows > 0 {
             for line in self.think_lines.iter().skip(self.think_lines.len() - think_rows) {
                 s.push_str("\x1b[35m");
-                s.push_str(&fit(line, self.cols));
-                s.push_str("\x1b[0m\x1b[K\r\n");
+                let width = if dock_w > 0 { dock_w } else { self.cols };
+                self.end_row(&mut s, &fit(line, width), dock_w);
             }
         }
 
@@ -722,8 +806,8 @@ impl Scr {
             } else {
                 s.push_str("\x1b[90m");
             }
-            s.push_str(&fit(&format!("{head}   {d}"), self.cols));
-            s.push_str("\x1b[0m\x1b[K\r\n");
+            let width = if dock_w > 0 { dock_w } else { self.cols };
+            self.end_row(&mut s, &fit(&format!("{head}   {d}"), width), dock_w);
         }
 
         // ---- live line: thinking / streaming tail / queue depth ----
@@ -795,6 +879,17 @@ impl Scr {
                 live_line = hint;
             } else {
                 live_line = format!("{live_line} | {hint}");
+            }
+        }
+        if !self.busy {
+            if let Some(pet) = &self.pet {
+                if let Some(b) = pet.borrow_mut().badge() {
+                    live_line = if live_line.is_empty() {
+                        b.to_string()
+                    } else {
+                        format!("{b} {live_line}")
+                    };
+                }
             }
         }
         if !live_line.is_empty() {
@@ -926,6 +1021,9 @@ impl Scr {
         let mut out = std::io::stdout();
         let _ = out.write_all(s.as_bytes());
         let _ = out.flush();
+        if let Some(pet) = &self.pet {
+            pet.borrow_mut().present();
+        }
     }
 
     fn draw_approval(&self, a: &ApprovalView) {
@@ -2440,6 +2538,7 @@ impl Scr {
                         return Some("/rewind".to_string());
                     }
                     crate::voice::request_stop();
+                    pet_note(self, pet::Ev::Esc);
                     continue;
                 }
                 0x09 => {
@@ -3462,6 +3561,26 @@ fn run_once(cfg: &Cfg, reg: &[tool::ToolDef], system_prompt: &str, prompt: &str)
 /// Front end for the terminal. Draws harness events, and keeps the keyboard
 /// live while the model works: typed text is echoed, Enter queues the message
 /// for after this turn, Esc cancels.
+fn pet_note(scr: &mut Scr, ev: pet::Ev) {
+    let Some(pet) = scr.pet.clone() else { return };
+    let unlocked = pet.borrow_mut().on_event(ev);
+    for id in unlocked {
+        let name = pet_growth::achievement_name(&id);
+        scr.push(&i18n::tf("pet_ach", &[&format!("{id} {name}")]), K_DIM);
+    }
+}
+
+fn apply_pet(scr: &mut Scr, cfg: &mut config::Config, arg: &str) {
+    let Some(pet) = scr.pet.clone() else { return };
+    let lines = pet.borrow_mut().command(arg, cfg, true);
+    for (text, kind) in lines {
+        if !text.is_empty() {
+            scr.push(&text, kind);
+        }
+    }
+    scr.pet_idle_frame();
+}
+
 struct TermUi<'a> {
     scr: &'a mut Scr,
     acc: String,
@@ -3541,14 +3660,21 @@ impl<'a> harness::Ui for TermUi<'a> {
 
     fn on(&mut self, ev: Ev) {
         match ev {
+            Ev::TurnStart => pet_note(self.scr, pet::Ev::TurnStart),
             Ev::Delta(d) => {
+                pet_note(self.scr, pet::Ev::Talk);
                 self.acc.push_str(&d);
                 self.scr.live = Some((2, tail_chars(&self.acc, 46)));
                 self.scr.draw();
             }
             Ev::ThinkingDelta(t) => {
+                pet_note(self.scr, pet::Ev::Thinking);
                 // Wrap incrementally: only the new characters are measured.
-                let wrap_cols = self.scr.cols.saturating_sub(2);
+                let wrap_cols = if self.scr.dock_columns() > 0 {
+                    self.scr.transcript_width().saturating_sub(2)
+                } else {
+                    self.scr.cols.saturating_sub(2)
+                };
                 for ch in t.chars() {
                     if ch == '\n' {
                         self.think_flush();
@@ -3572,6 +3698,7 @@ impl<'a> harness::Ui for TermUi<'a> {
                 self.scr.draw();
             }
             Ev::Thinking { secs, chars } => {
+                pet_note(self.scr, pet::Ev::Thinking);
                 const FRAMES: [char; 4] = ['|', '/', '-', '\\'];
                 let f = FRAMES[self.spin % FRAMES.len()];
                 self.spin += 1;
@@ -3584,6 +3711,7 @@ impl<'a> harness::Ui for TermUi<'a> {
                 self.scr.draw();
             }
             Ev::ThinkingDone { secs, chars } => {
+                pet_note(self.scr, pet::Ev::ThinkingDone);
                 let had_lines = !self.scr.think_lines.is_empty();
                 self.reset_think();
                 self.scr.live = None;
@@ -3595,6 +3723,7 @@ impl<'a> harness::Ui for TermUi<'a> {
                 }
             }
             Ev::Assistant(t) => {
+                pet_note(self.scr, pet::Ev::TalkDone);
                 self.reset_think();
                 self.acc.clear();
                 self.scr.live = None;
@@ -3603,6 +3732,7 @@ impl<'a> harness::Ui for TermUi<'a> {
                 self.scr.push_md(&t);
             }
             Ev::ToolCall { id, name, title, args } => {
+                pet_note(self.scr, pet::Ev::ToolCall(name.clone()));
                 self.reset_think();
                 self.scr.live = None;
                 if self.scr.turn_tools.len() < 200 {
@@ -3637,10 +3767,12 @@ impl<'a> harness::Ui for TermUi<'a> {
             }
             Ev::ToolResult {
                 id,
+                name,
                 content,
                 is_error,
                 ..
             } => {
+                pet_note(self.scr, pet::Ev::ToolResult { name: name.clone(), is_error });
                 self.scr.live = None;
                 // The pending line was drawn when the call started; this one
                 // adds the outcome and a short preview of what came back.
@@ -3699,6 +3831,7 @@ impl<'a> harness::Ui for TermUi<'a> {
             }
             Ev::Context(c) => self.scr.push(&context_marker(&c), K_DIM),
             Ev::Compacting { tokens, messages } => {
+                pet_note(self.scr, pet::Ev::Compact);
                 self.reset_think();
                 self.scr.live = Some((
                     1,
@@ -3710,6 +3843,7 @@ impl<'a> harness::Ui for TermUi<'a> {
                 self.scr.draw();
             }
             Ev::CompactingDone { ok, note } => {
+                pet_note(self.scr, pet::Ev::CompactDone { ok });
                 self.scr.live = None;
                 if !ok {
                     self.scr.push(&i18n::tf("ui_compaction_failed", &[&note]), K_DIM);
@@ -3717,6 +3851,7 @@ impl<'a> harness::Ui for TermUi<'a> {
             }
             Ev::StateReport(t) => self.scr.set_state(t),
             Ev::TurnEnd { .. } => {
+                pet_note(self.scr, pet::Ev::TurnEnd);
                 self.scr.flush_state();
                 self.scr.draw();
             }
@@ -4055,6 +4190,7 @@ impl<'a> harness::Ui for TermUi<'a> {
                     // step instead of only cancelling the tool in flight. Chat
                     // text typed so far becomes the next message; a command is
                     // executed/refused with the same busy-time rules.
+                    pet_note(self.scr, pet::Ev::Esc);
                     crate::voice::request_stop();
                     let line: String = self.scr.input.iter().collect();
                     let line = line.trim().to_string();
@@ -4356,6 +4492,10 @@ impl<'a> TermUi<'a> {
             crate::voice::request_stop();
             self.scr.quit = true;
             self.interrupted = true;
+        }
+        if let Some(arg) = out.pet {
+            let mut guard = self.cfg_rc.borrow_mut();
+            apply_pet(self.scr, &mut guard, &arg);
         }
         // Anything that owns the screen or rewrites history is never allowed
         // here (classification should prevent it; this is the belt-and-braces
@@ -7285,6 +7425,9 @@ fn main() {
         );
         return;
     }
+    if argv.get(1).map(|s| s.as_str()) == Some("--pet-preview") {
+        std::process::exit(pet_ui::preview(&argv));
+    }
     if argv.iter().any(|a| a == "--dsh-login-test") {
         let port = 7788u16;
         let mut never_cancel = || false;
@@ -7544,6 +7687,9 @@ start another one in a different terminal or tmux window"
     crate::apps::set_screen_available(true);
     crate::ask::set_screen_available(true);
 
+    scr.pet = Some(std::rc::Rc::new(std::cell::RefCell::new(pet_ui::Host::boot(
+        &config_rc.borrow(),
+    ))));
     scr.seed_splash(&cfg.model);
     onboarding(&mut scr, &config_rc);
     maybe_show_tips(&mut scr, &config_rc);
@@ -7675,6 +7821,10 @@ start another one in a different terminal or tmux window"
                 }
                 for (text, kind) in out.lines {
                     scr.push(&text, kind);
+                }
+                if let Some(arg) = out.pet.clone() {
+                    let mut guard = config_rc.borrow_mut();
+                    apply_pet(&mut scr, &mut guard, &arg);
                 }
                 if out.quit {
                     break;
