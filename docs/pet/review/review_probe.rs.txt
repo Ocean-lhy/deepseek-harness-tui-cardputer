@@ -1,0 +1,75 @@
+use crate::pet::{Ev, Machine, Pose};
+use crate::pet_growth::{self, GEvent, Save};
+
+const T0: u64 = 1_795_000_000_000;
+
+#[test]
+fn probe_api_failure_turn_is_celebrated() {
+    // harness on ApiEv::Failed emits Note + TurnEnd only.
+    let mut m = Machine::default();
+    m.on(Ev::TurnStart, T0);
+    m.on(Ev::Thinking, T0 + 100);
+    let g = m.on(Ev::TurnEnd, T0 + 900);
+    println!("api-failure TurnEnd growth={:?} pose={:?}", g, m.pose(T0 + 1000));
+    assert_eq!(g, Some(GEvent::Success));
+    assert_eq!(m.pose(T0 + 1000), Pose::Success);
+}
+
+#[test]
+fn probe_cancel_turn_is_celebrated() {
+    let mut m = Machine::default();
+    m.on(Ev::TurnStart, T0);
+    m.on(Ev::ToolCall("bash".into()), T0 + 100);
+    m.on(Ev::Esc, T0 + 200);
+    let g = m.on(Ev::TurnEnd, T0 + 300);
+    println!("cancel TurnEnd growth={:?} pose={:?}", g, m.pose(T0 + 400));
+    assert_eq!(g, Some(GEvent::Success));
+}
+
+#[test]
+fn probe_reference_usage_stats_are_dropped() {
+    let usage = r#"{\"tools\":7,\"code\":3,\"successes\":5,\"failures\":2,\"messages\":9,\"keywords\":4,\"pat\":11}"#;
+    let json = format!(
+        r#"{{"schema":"dsh-whale-musume/save","version":1,"data":{{"mood":"70","affinity":"10","usageStats":"{usage}"}}}}"#
+    );
+    let s = pet_growth::import_text(&json, T0 as i64).expect("import");
+    println!("imported usage = {:?}", s.usage);
+    let out = pet_growth::export_json(&s, T0 as i64, "dst");
+    let idx = out.find("usageStats").unwrap();
+    println!("re-exported usageStats = {}", &out[idx..(idx + 140).min(out.len())]);
+    assert_eq!(s.usage.success, 0);
+    assert_eq!(s.usage.pats, 0);
+    assert!(!out.contains("keywords"));
+}
+
+#[test]
+fn probe_title_with_sk_dash_blocks_every_save() {
+    let mut s = Save::default();
+    s.title = "Task-master".into();
+    let dir = std::env::temp_dir().join(format!("review-sk-{}", std::process::id()));
+    let r = pet_growth::store_file(&dir.join("pet.json"), &s);
+    println!("store_file with title Task-master -> {:?}", r);
+    assert!(r.is_err());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn probe_render_tool_kinds_and_idle_ticks() {
+    use crate::pet::{kind_of, Pose};
+    use crate::pet_art::{self, Paint, Scene};
+    let dir = std::path::PathBuf::from("/tmp/review-shots");
+    let _ = std::fs::create_dir_all(&dir);
+    for (label, tool) in [("shell","bash"),("read","read_file"),("web","fetch"),("write","edit_file"),
+        ("look","ocr"),("plan","todo_write"),("schedule","cron"),("voice","speak"),("ask","ask_user"),
+        ("screen","artifact"),("generic","mcp__x")] {
+        let kind = kind_of(tool).unwrap();
+        let prop = Pose::Tool.prop(kind);
+        let sprite = pet_art::pose_sprite("tool", 1);
+        let p = Paint::new(Scene::Dock, sprite, prop);
+        std::fs::write(dir.join(format!("tool-{label}.ppm")), pet_art::ppm(&pet_art::render(&p, None))).unwrap();
+    }
+    for t in 0..20u64 {
+        let p = Paint::new(Scene::Dock, pet_art::pose_sprite("idle", t), "");
+        std::fs::write(dir.join(format!("idle-t{t:02}.ppm")), pet_art::ppm(&pet_art::render(&p, None))).unwrap();
+    }
+}

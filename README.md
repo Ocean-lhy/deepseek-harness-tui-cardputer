@@ -483,6 +483,7 @@ Commands run locally and are never sent to the model.
 | `/update [nightly\|stable]` | check the update channel, switch it, and install a newer build (asks first) |
 | `/clear` | start a new conversation: reset the history, context ring and session, restart the splash |
 | `/new` | same as `/clear` (an explicit "new conversation") |
+| `/pet [on\|off\|dock\|room\|pat\|feed\|praise\|stats\|export\|import\|pack]` | whale-girl desk pet. Off unless `pet.enabled` is true, so the transcript stays 53 columns. `/pet on` uses a 10-column dock (43-column transcript) when a panel or `DST_PET_FB_OUT` is available, and a character portrait otherwise. See `docs/pet/DESIGN.md` and `docs/pet/PACK.md`. |
 | `/quit` | exit |
 
 ## Key bindings
@@ -700,7 +701,13 @@ credentials in the tree, and every UI string in the i18n catalogue.
   instructions architecture this port follows.
 - The public-domain X11 6×13 bitmap font, vendored for pixel-accurate
   screenshots.
-- The original dsh-TUI pixel whale, reused frame-for-frame in the splash.
+- The original dsh-TUI pixel whale, reused frame-for-frame in the splash (not the desk pet).
+- The whale-girl growth rules and achievement ids, reimplemented from
+  `Sutera-Diffusus/dsh-whale-musume` (`assets/whale-moe-core.js`, MIT). The
+  portraits in that repository are not included here; see `docs/pet/DESIGN.md`.
+- The built-in whale-girl pixels are original to this repository and follow
+  the GPL-3.0 license of `dst`. The simulator's 6×13 font is the public-domain
+  X11 font.
 
 <div align="center">
 <br>

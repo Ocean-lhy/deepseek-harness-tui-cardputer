@@ -1,0 +1,12 @@
+
+
+
+
+
+whale girl
+  deepseek-flash | hold Tab to talk | /help
+> /pet wibble wobble long argument
+usage: /pet [on|off|dock|room|text|pixel|pat|feed|pra
+ise|stats|export|import <file>|pack]
+Up/Down hist · PgUp/PgDn · CtrlO out · /help
+>

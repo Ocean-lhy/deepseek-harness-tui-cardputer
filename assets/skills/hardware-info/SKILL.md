@@ -165,7 +165,9 @@ These are the pinned "known good" values for the shipping image; the scan sectio
 ## How dst talks to the hardware
 
 - **Panel**: `cpzterm.service` starts fbterm on tty1 and runs `dst` inside it; dst owns the tty. An app started by `app_run` inherits the same
-  stdout/stdin and must stay inside 53x12 cells. Never open `/dev/fb*`, `/dev/dri/*` or APPLaunch from inside dst - the panel belongs to fbterm.
+  stdout/stdin and must stay inside 53x12 cells. Apps must never open `/dev/fb*`, `/dev/dri/*` or APPLaunch — the panel belongs to fbterm.
+  dst's own whale-girl pet is the exception: it paints only after sysfs says the node is 16bpp and 320×170, and only into `/dev/fb_lcd`,
+  `/dev/fb_panel`, or a path the user set with `pet.fb` / `DST_FB`. It does not open an unidentified `/dev/fbN`.
 - **Keys**: a normal Linux console keyboard. The fn layer already emits arrow/paging keycodes, which the VT turns into `ESC[A`..`ESC[D`,
   `ESC[5~`/`ESC[6~`; long Esc is the platform back/HOME action. dst decodes sequences, apps read plain bytes.
 - **Audio**: `arecord`/`aplay` with `-D hw:CARD=ES8389Audio,DEV=0` (dst uses these for ASR/TTS); remember the ~0.5 s unmute pad on capture.
