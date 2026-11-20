@@ -1,0 +1,12 @@
+> hi
+This reply is deliberately long so that
+the transcript must wrap at forty three
+columns when the pet dock is showing on
+the right.
+achievement: first-success 旗开得胜
+
+
+
+
+Up/Down hist · PgUp/PgDn · CtrlO out · /help
+>                                              ○ 2.3%
