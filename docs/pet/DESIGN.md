@@ -525,6 +525,8 @@ DSH 事件来自 `harness::Ev`；存档格式兼容参考仓 schema v1 / `WM1`�
 
 ### 10.1 立绘许可（证据与未决）
 
+> 2026-11-23 更新：所有者在上游 issue #17 公开声明 92 张立绘按 MIT 发布，下面「没有图片许可」的判断已被替代。见 `docs/pet/ASSET-LICENSE.md`。
+
 查过的是 `Ocean-lhy/dsh-whale-musume` @ `6e77caed46da3629921b6a4b2b7dacb0838b36b6`
 （fork 自 `Sutera-Diffusus/dsh-whale-musume`，功能提交 `3928dfa`）：
 
