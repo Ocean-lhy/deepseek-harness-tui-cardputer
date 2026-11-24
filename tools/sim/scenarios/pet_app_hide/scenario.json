@@ -1,0 +1,128 @@
+{
+ "steps": [
+  {
+   "wait_for": {
+    "text": "dst",
+    "timeout_ms": 10000
+   }
+  },
+  {
+   "send": "/apps"
+  },
+  {
+   "key": "Enter"
+  },
+  {
+   "wait_ms": 500,
+   "snap": "list"
+  },
+  {
+   "key": "Enter"
+  },
+  {
+   "wait_for": {
+    "text": "QUICK APP",
+    "timeout_ms": 20000
+   }
+  },
+  {
+   "wait_ms": 150,
+   "snap": "running"
+  },
+  {
+   "wait_stable": {
+    "stable_ms": 800,
+    "timeout_ms": 20000
+   },
+   "snap": "menu_back"
+  },
+  {
+   "key": "Esc"
+  },
+  {
+   "wait_stable": {
+    "stable_ms": 600,
+    "timeout_ms": 15000
+   },
+   "snap": "after"
+  },
+  {
+   "send": "/apps"
+  },
+  {
+   "key": "Enter"
+  },
+  {
+   "wait_ms": 450
+  },
+  {
+   "key": "Right"
+  },
+  {
+   "wait_ms": 500,
+   "snap": "quick_panel"
+  },
+  {
+   "key": "Esc"
+  },
+  {
+   "wait_ms": 250
+  },
+  {
+   "wait_ms": 200,
+   "snap": "recent"
+  },
+  {
+   "send": "/"
+  },
+  {
+   "wait_ms": 200
+  },
+  {
+   "send": "notes"
+  },
+  {
+   "wait_ms": 400,
+   "snap": "filtered"
+  },
+  {
+   "key": "Enter"
+  },
+  {
+   "wait_ms": 200,
+   "snap": "accepted"
+  },
+  {
+   "key": "Enter"
+  },
+  {
+   "wait_ms": 600,
+   "snap": "doc"
+  },
+  {
+   "key": "Esc"
+  },
+  {
+   "wait_ms": 300,
+   "snap": "doc_back"
+  },
+  {
+   "key": "Esc"
+  },
+  {
+   "wait_ms": 250
+  },
+  {
+   "key": "Esc"
+  },
+  {
+   "wait_ms": 250
+  }
+ ],
+ "env": {
+  "DST_PET_PACK": "/opt/cursor/artifacts/pet-pack-debug",
+  "DST_PET_FB_OUT": "/tmp/dst-pet-app.ppm",
+  "DST_NO_UPDATE_CHECK": "1",
+  "DST_PET_TRIAL": "1"
+ }
+}

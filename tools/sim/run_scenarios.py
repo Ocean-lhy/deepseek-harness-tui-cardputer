@@ -257,6 +257,8 @@ def run_scenario(name, binary, timeout=None):
         for scen_path, phase_out, phase_cwd in scenario_paths:
             cmd = [sys.executable, SIM, "--bin", binary, "--home", home,
                    "--cwd", phase_cwd, "--out", phase_out, "--scenario", scen_path]
+            for _ek, _ev in (doc.get("env") or {}).items():
+                cmd += ["--env", f"{_ek}={_ev}"]
             # Text snapshots are enough for assertions; PNG rendering is only
             # needed when a contact sheet is being produced.
             if not os.environ.get("DST_SCENARIO_PNG"):
@@ -458,11 +460,44 @@ def check_esc_queue(screens, reqs, work):
     return checks
 
 
+def check_pet_bounds(screens, reqs, work):
+    settled = screens.get("settled", "")
+    live = screens.get("live", "")
+
+    def widest(text):
+        return max((line.count("Z") for line in text.splitlines()), default=0)
+
+    checks = []
+    checks.append((widest(settled) == 43,
+                   f"settled body wraps at 43 columns, got {widest(settled)}"))
+    checks.append((0 < widest(live) <= 43,
+                   f"streaming row stays inside the dock, got {widest(live)}"))
+    checks.append(("Z" * 44 not in live and "Z" * 44 not in settled,
+                   "44 Zs never share one row"))
+    checks.append((len(reqs) == 1, "one scripted reply, no extra model call"))
+    return checks
+
+
 def check_step_limit(screens, reqs, work):
     limited = screens.get("limited", "")
     checks = []
     checks.append(("step limit reached (1)" in limited, "configured step cap is reported"))
     checks.append((len(reqs) == 1, "no second model request after hitting the cap"))
+    pet_path = os.path.join(work, "home", ".dst", "pet.json")
+    try:
+        pet = json.load(open(pet_path, encoding="utf-8"))
+        raw = (pet.get("data") or {}).get("usageStats") or "{}"
+        usage = json.loads(raw) if isinstance(raw, str) else raw
+    except (OSError, json.JSONDecodeError):
+        usage = None
+    successes = 0
+    if isinstance(usage, dict) and "successes" in usage:
+        try:
+            successes = float(usage["successes"])
+        except (TypeError, ValueError):
+            successes = -1
+    checks.append((usage is not None and successes == 0,
+                   f"a step cap is not a pet success ({pet_path}: {usage})"))
     return checks
 
 
@@ -2637,6 +2672,7 @@ CHECKS = {
     "creator_app_test": check_creator_app_test,
     "creator_kinds": check_creator_kinds,
     "creator_apps_run": check_creator_apps_run,
+    "pet_app_hide": check_creator_apps_run,
     "creator_run_args": check_creator_run_args,
     "creator_mode": check_creator_mode,
     "creator_build": check_creator_build,
@@ -2719,6 +2755,7 @@ CHECKS = {
     "empty_states_zh": check_empty_states_zh,
     "esc_cancel": check_esc_cancel,
     "step_limit": check_step_limit,
+    "pet_bounds": check_pet_bounds,
     "unlimited_steps": check_unlimited_steps,
     "repeat_reminder": check_repeat_reminder,
     "time_context": check_time_context,

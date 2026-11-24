@@ -7,3 +7,8 @@ agent:
   max_steps: 1
 context:
   time: false
+pet:
+  enabled: true
+  dock: false
+  room: false
+  render: text

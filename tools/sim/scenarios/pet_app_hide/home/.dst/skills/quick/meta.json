@@ -1,0 +1,1 @@
+{"title": "Quick app", "kind": "sh", "entry": "run.sh", "default_args": "--fast", "version": 1, "created": "2026-01-01T10:00:00+08:00", "updated": "2026-01-01T10:00:00+08:00", "last_run": {"at": "2026-01-01T10:05:00+08:00", "secs": 1.0, "outcome": "exit 0"}}

@@ -63,6 +63,13 @@ context:
   time: true                  # inject the attributed clock reading
   time_refresh_secs: 600      # 0 = inject on every step
 
+pet:
+  enabled: false              # whale girl. false keeps the 53-column transcript
+  dock: true                  # right-hand 10-column dock when the pet is on
+  room: true                  # full idle room instead of the character-whale splash
+  render: auto                # auto | pixel | text
+  # fb: /dev/fb_lcd           # optional explicit panel; still must be 16bpp 320x170
+
 skills:
   disabled: []                # skill names hidden from the catalog and the skill tool
 
@@ -179,6 +186,9 @@ insert:
   jobs.json      cron and file-watch jobs
   usage.json     cumulative token totals for /usage
   history        input history (mode 600)
+  pet.json       whale-girl growth (mode 600); not an API key and not the chat
+  pet-export.json / pet-export.wm1   written by /pet export
+  pet-pack/      optional PPM sprites (idle.ppm and other poses)
   cache/         transient audio and scratch files
   logs/          voice.log, mcp.log
   tmp/           per-run temporary files, app_test logs, saved tool output
@@ -216,6 +226,10 @@ device:
 | `DST_MOCK_ASR_TEXT` | transcript returned by the fake ASR |
 | `DST_MOCK_TTS_MS` | fake TTS playback duration |
 | `DST_BIN` | binary under test for `tools/sim` |
+| `DST_NO_UPDATE_CHECK=1` | do not let a release binary replace itself; required for simulator runs |
+| `DST_PET_FB_OUT` | write the pet's 320×170 PPM here (magenta is transparent) |
+| `DST_FB` | explicit framebuffer path, overriding `pet.fb` |
+| `DST_PET_FB_FORCE=1` | paint a probed panel even when fbterm is not an ancestor |
 | `DST_LIVE_BASE`, `DST_LIVE_MODEL` | endpoint for `tools/sim/run_live.py` |
 
 ## Deployment variables (host side)

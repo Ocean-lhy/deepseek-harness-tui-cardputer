@@ -889,6 +889,22 @@ class ScreenRenderer:
         except Exception:
             pass
 
+        # Production pet pixels. dst writes a 320×170 PPM when DST_PET_FB_OUT
+        # is set; magenta is the transparent key, same as the framebuffer blit.
+        overlay = getattr(self, "pet_fb_out", None)
+        if overlay and os.path.isfile(overlay):
+            try:
+                pet = Image.open(overlay).convert("RGB")
+                if pet.size == (self.panel_w, self.panel_h):
+                    pp = pet.load()
+                    for y in range(self.panel_h):
+                        for x in range(self.panel_w):
+                            pix = pp[x, y]
+                            if pix != (255, 0, 255):
+                                px[x, y] = pix
+            except Exception as exc:
+                log(f"warning: pet overlay {overlay} not composited: {exc!r}")
+
         if self.scale == 1:
             img.save(path, "PNG")
         else:
@@ -1754,6 +1770,7 @@ def main(argv=None):
             mono_path=args.mono_font, cjk_path=args.cjk_font,
             symbol_path=args.symbol_font, font_mode=args.font_mode,
             subpixel=args.subpixel != "off", native=args.native)
+        renderer.pet_fb_out = extra_env.get("DST_PET_FB_OUT")
         out_w, out_h = renderer.output_size
         log(f"renderer: {renderer.font_mode} font mode, subpixel="
             f"{'on' if renderer.subpixel else 'off'}, "

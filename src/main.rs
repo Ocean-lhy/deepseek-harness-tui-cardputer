@@ -23,8 +23,13 @@ mod config;
 mod dsh_login;
 mod context;
 mod goal;
+mod fb;
 mod harness;
 mod hwinfo;
+mod pet;
+mod pet_art;
+mod pet_growth;
+mod pet_ui;
 mod i18n;
 mod instructions;
 mod jobs;
@@ -162,6 +167,12 @@ pub struct Scr {
     /// Draft preserved while browsing history.
     hist_draft: String,
     on_tick: Option<Box<dyn FnMut(&mut Scr)>>,
+    /// Whale-girl session. Absent in unit tests that build a bare screen.
+    pet: Option<pet_ui::PetHandle>,
+    /// Portrait pixels were cleared for a full-screen layer.
+    pet_hidden: std::cell::Cell<bool>,
+    /// The next normal draw must erase dock cells a menu wrote.
+    pet_scrub: std::cell::Cell<bool>,
 }
 
 /// One recorded tool call for the CtrlO viewer: the expanded arguments and the
@@ -376,7 +387,104 @@ impl Scr {
             hist_pos: None,
             hist_draft: String::new(),
             on_tick: None,
+            pet: None,
+            pet_hidden: std::cell::Cell::new(false),
+            pet_scrub: std::cell::Cell::new(false),
         }
+    }
+
+    /// The idle room is only the untouched opening splash. A command or a
+    /// conversation leaves it, so the room picture cannot cover that text.
+    fn idle_splash_only(&self) -> bool {
+        self.art_on && !self.splash_done && self.lines.len() == art::ART_ROWS + 1
+    }
+
+    /// Columns the transcript may use. 0 from the pet means "no dock".
+    /// The panel is 53 cells even when the pty reports fewer: a 49-column
+    /// probe used to wrap the dock at 39.
+    fn dock_columns(&self) -> usize {
+        let Some(pet) = &self.pet else { return 0 };
+        let mut host = pet.borrow_mut();
+        host.follow(self.idle_splash_only());
+        host.dock_width(PANEL_COLS)
+    }
+
+    fn transcript_width(&self) -> usize {
+        let dock = self.dock_columns();
+        if dock > 0 { dock } else { self.cols.min(PANEL_COLS) }
+    }
+
+    /// Columns a streaming tail may use. The dock is 43 cells, not the pty width.
+    fn stream_tail_cols(&self) -> usize {
+        if self.dock_columns() > 0 { self.transcript_width() } else { self.cols }
+    }
+
+    fn push_live_row(&self, s: &mut String, live_line: &str, dock_w: usize, scrub: bool) {
+        let width = if dock_w > 0 { dock_w } else { self.cols };
+        let shown = fit(live_line, width);
+        self.end_row(s, &shown, dock_w, scrub);
+    }
+
+    /// Hide the pet before a saved app or any other program takes the screen.
+    /// The next normal frame scrubs the cells once and paints the pet back.
+    fn yield_panel(&self) {
+        if let Some(pet) = &self.pet {
+            pet.borrow_mut().conceal();
+        }
+        self.pet_hidden.set(true);
+        self.pet_scrub.set(true);
+    }
+
+    /// Finish a row. Dock rows are padded to the text width and not cleared
+    /// to the edge, so the framebuffer pet in columns 43–52 is left alone.
+    /// `scrub` clears those cells once after a full-screen layer, before the
+    /// portrait is painted back.
+    fn end_row(&self, s: &mut String, text: &str, dock_w: usize, scrub: bool) {
+        if dock_w > 0 && !scrub {
+            let fitted = fit(text, dock_w);
+            let pad = dock_w.saturating_sub(dw(&fitted));
+            s.push_str(&fitted);
+            s.push_str(&" ".repeat(pad));
+            s.push_str("\x1b[0m\r\n");
+        } else {
+            let shown = if dock_w > 0 { fit(text, dock_w) } else { text.to_string() };
+            s.push_str(&shown);
+            s.push_str("\x1b[0m\x1b[K\r\n");
+        }
+    }
+
+    /// While the opening splash is up, the idle room replaces the character
+    /// whale. Returns true when it drew a frame and the whale animation
+    /// should stay put.
+    fn pet_idle_frame(&mut self) -> bool {
+        if !self.idle_splash_only() {
+            return false;
+        }
+        let Some(pet) = self.pet.clone() else { return false };
+        // Own the decision before touching `self`: the face borrows the host.
+        let face = {
+            let mut host = pet.borrow_mut();
+            match host.idle_face() {
+                pet_ui::IdleFace::Hidden => None,
+                pet_ui::IdleFace::Pixel => Some(Vec::new()),
+                pet_ui::IdleFace::Text(rows) => {
+                    Some(rows.iter().take(9).map(|r| (*r).to_string()).collect())
+                }
+            }
+        };
+        let Some(rows) = face else { return false };
+        if rows.is_empty() {
+            for i in 0..9 {
+                let text = if i == 8 { i18n::t("pet_room_hint").to_string() } else { String::new() };
+                self.lines[i] = (text, K_DIM);
+            }
+        } else {
+            for (i, row) in rows.into_iter().enumerate() {
+                self.lines[i] = (row, K_ART);
+            }
+        }
+        self.draw();
+        true
     }
 
     fn cw(c: char) -> usize {
@@ -504,7 +612,7 @@ impl Scr {
         Self::wrap_into(
             &mut wrapped,
             &format!("{STATE_ICON} {text}"),
-            self.cols.min(PANEL_COLS),
+            self.transcript_width(),
         );
         for w in wrapped {
             self.lines.push((w, K_STATE));
@@ -544,6 +652,7 @@ impl Scr {
         self.lines.push((splash_hint(model, self.cols), K_DIM));
         self.art_on = true;
         self.draw();
+        self.pet_idle_frame();
     }
 
     /// Advance the splash animation while the user has not started working.
@@ -553,6 +662,9 @@ impl Scr {
     /// one swap per 0.6-1.8 s while motion frames swap every 0.3 s; the
     /// top-of-loop `draw()` repaints the unchanged frame in between.
     fn anim_tick(&mut self) {
+        if self.pet_idle_frame() {
+            return;
+        }
         if !self.art_on
             || !self.input.is_empty()
             || self.scroll != 0
@@ -578,7 +690,7 @@ impl Scr {
         // committed to the log when the turn ends (Ev::TurnEnd) or on /clear.
         let mut wrapped = Vec::new();
         let shown = tidy(text);
-        Self::wrap_into(&mut wrapped, &shown, self.cols.min(PANEL_COLS));
+        Self::wrap_into(&mut wrapped, &shown, self.transcript_width());
         for w in wrapped {
             self.lines.push((w, kind));
         }
@@ -599,6 +711,17 @@ impl Scr {
     }
 
     fn draw(&self) {
+        let overlay = self.approval.is_some()
+            || self.ask.is_some()
+            || self.menu.is_some()
+            || self.qr.is_some()
+            || self.artifact.is_some();
+        if overlay && !self.pet_hidden.replace(true) {
+            if let Some(pet) = &self.pet {
+                pet.borrow_mut().conceal();
+            }
+            self.pet_scrub.set(true);
+        }
         if let Some(a) = &self.approval {
             self.draw_approval(a);
             return;
@@ -632,17 +755,20 @@ impl Scr {
             self.draw_artifact(a);
             return;
         }
+        let scrub = self.pet_scrub.replace(false);
+        self.pet_hidden.set(false);
         let mut s = String::with_capacity(4096);
         s.push_str("\x1b[?25l");
         s.push_str("\x1b[H");
+        let dock_w = self.dock_columns();
 
         // ---- pinned progress row (`state_report`) ----
         // It owns the top row for as long as it is the newest activity, so the
         // user always sees the current stage without hunting in the log.
         if let Some(text) = &self.state_line {
             s.push_str("\x1b[1;35m");
-            s.push_str(&fit(&format!("{STATE_ICON} {text}"), self.cols));
-            s.push_str("\x1b[0m\x1b[K\r\n");
+            let width = if dock_w > 0 { dock_w } else { self.cols };
+            self.end_row(&mut s, &fit(&format!("{STATE_ICON} {text}"), width), dock_w, scrub);
         }
 
         // Layout: [state(0/1)] + transcript + palette + live(1) + input(1).
@@ -682,17 +808,25 @@ impl Scr {
                     K_HEAD => s.push_str("\x1b[1;37m"),
                     _ => s.push_str("\x1b[0m"),
                 }
+                if dock_w > 0 {
+                    self.end_row(&mut s, txt, dock_w, scrub);
+                    continue;
+                }
                 s.push_str(txt);
             }
-            s.push_str("\x1b[0m\x1b[K\r\n");
+            if dock_w > 0 {
+                self.end_row(&mut s, "", dock_w, scrub);
+            } else {
+                s.push_str("\x1b[0m\x1b[K\r\n");
+            }
         }
 
         // ---- live reasoning (folded once the answer begins) ----
         if think_rows > 0 {
             for line in self.think_lines.iter().skip(self.think_lines.len() - think_rows) {
                 s.push_str("\x1b[35m");
-                s.push_str(&fit(line, self.cols));
-                s.push_str("\x1b[0m\x1b[K\r\n");
+                let width = if dock_w > 0 { dock_w } else { self.cols };
+                self.end_row(&mut s, &fit(line, width), dock_w, scrub);
             }
         }
 
@@ -722,8 +856,8 @@ impl Scr {
             } else {
                 s.push_str("\x1b[90m");
             }
-            s.push_str(&fit(&format!("{head}   {d}"), self.cols));
-            s.push_str("\x1b[0m\x1b[K\r\n");
+            let width = if dock_w > 0 { dock_w } else { self.cols };
+            self.end_row(&mut s, &fit(&format!("{head}   {d}"), width), dock_w, scrub);
         }
 
         // ---- live line: thinking / streaming tail / queue depth ----
@@ -797,6 +931,17 @@ impl Scr {
                 live_line = format!("{live_line} | {hint}");
             }
         }
+        if !self.busy {
+            if let Some(pet) = &self.pet {
+                if let Some(b) = pet.borrow_mut().badge() {
+                    live_line = if live_line.is_empty() {
+                        b.to_string()
+                    } else {
+                        format!("{b} {live_line}")
+                    };
+                }
+            }
+        }
         if !live_line.is_empty() {
             s.push_str(if hot {
                 "\x1b[31m"
@@ -805,10 +950,8 @@ impl Scr {
             } else {
                 "\x1b[90m"
             });
-            s.push_str(&fit(&live_line, self.cols));
-            s.push_str("\x1b[0m");
         }
-        s.push_str("\x1b[K\r\n");
+        self.push_live_row(&mut s, &live_line, dock_w, scrub);
 
         // ---- input line: prompt + text, with the context ring pinned right ----
         let ring = if self.ctx_window > 0 {
@@ -926,6 +1069,9 @@ impl Scr {
         let mut out = std::io::stdout();
         let _ = out.write_all(s.as_bytes());
         let _ = out.flush();
+        if let Some(pet) = &self.pet {
+            pet.borrow_mut().present();
+        }
     }
 
     fn draw_approval(&self, a: &ApprovalView) {
@@ -2218,6 +2364,10 @@ impl Scr {
 
     fn edit(&mut self) -> Option<String> {
         loop {
+            if crate::fb::shutdown_requested().is_some() {
+                self.quit = true;
+                return None;
+            }
             self.draw();
             if self.qr.is_some() {
                 match self.read_key_timeout() {
@@ -2440,6 +2590,7 @@ impl Scr {
                         return Some("/rewind".to_string());
                     }
                     crate::voice::request_stop();
+                    pet_note(self, pet::Ev::Esc);
                     continue;
                 }
                 0x09 => {
@@ -2687,6 +2838,133 @@ fn strip_inline(s: &str) -> String {
 #[cfg(test)]
 mod inline_tests {
     use super::{claim_terminal, strip_inline, tty_lock_name};
+
+    #[test]
+    fn dock_text_wraps_at_43_even_when_the_pty_is_narrower() {
+        let mut scr = super::Scr::new();
+        scr.cols = 49;
+        scr.rows = 12;
+        scr.art_on = false;
+        scr.splash_done = true;
+        scr.pet = Some(std::rc::Rc::new(std::cell::RefCell::new(
+            crate::pet_ui::pixel_dock_for_test(),
+        )));
+        let forty_three: String = "x".repeat(43);
+        scr.push(&forty_three, super::K_NORM);
+        let last = scr.lines.last().map(|(t, _)| t.clone()).unwrap_or_default();
+        assert_eq!(last.chars().count(), 43, "wrapped to {last:?}");
+        scr.push(&"y".repeat(44), super::K_NORM);
+        let widths: Vec<usize> = scr.lines.iter().rev().take(2).map(|(t, _)| t.chars().count()).collect();
+        assert_eq!(widths, vec![1, 43], "44 cells must break after 43, got {widths:?}");
+    }
+
+    #[test]
+    fn a_command_leaves_the_idle_room_so_the_text_stays() {
+        let mut scr = super::Scr::new();
+        scr.art_on = true;
+        scr.splash_done = false;
+        scr.rows = 12;
+        scr.cols = 53;
+        scr.lines = vec![("splash".into(), super::K_ART); super::art::ART_ROWS + 1];
+        scr.lines.push(("command output that must stay".into(), super::K_NORM));
+        scr.pet = Some(std::rc::Rc::new(std::cell::RefCell::new(
+            crate::pet_ui::pixel_dock_for_test(),
+        )));
+        assert!(!scr.pet_idle_frame());
+        assert_eq!(scr.lines[0].0, "splash");
+        assert_eq!(scr.lines.last().unwrap().0, "command output that must stay");
+    }
+
+    #[test]
+    fn an_overlay_conceals_the_pet_and_the_next_frame_paints_it() {
+        let ppm = std::env::temp_dir().join(format!(
+            "dst-pet-overlay-{}-{}.ppm",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let mut host = crate::pet_ui::pixel_dock_for_test();
+        crate::pet_ui::set_out_for_test(&mut host, ppm.clone());
+        let mut scr = super::Scr::new();
+        scr.rows = 12;
+        scr.cols = 53;
+        scr.art_on = false;
+        scr.splash_done = true;
+        scr.pet = Some(std::rc::Rc::new(std::cell::RefCell::new(host)));
+        scr.draw();
+        let shown = std::fs::read(&ppm).unwrap();
+        let shown = crate::pet_art::decode_ppm(&shown).unwrap();
+        assert!(
+            shown.rgb.chunks(3).any(|p| p != crate::pet_art::KEY),
+            "the dock frame should paint the pet before a menu covers it"
+        );
+        scr.menu = Some(super::Menu {
+            title: "help".into(),
+            items: vec![super::MenuItem { label: "pet".into(), value: String::new() }],
+            sel: 0,
+            hint: String::new(),
+            preview: None,
+        });
+        scr.draw();
+        let hidden = crate::pet_art::decode_ppm(&std::fs::read(&ppm).unwrap()).unwrap();
+        assert!(
+            hidden.rgb.chunks(3).all(|p| p == crate::pet_art::KEY),
+            "a full-screen menu must conceal the pet, not leave it on top"
+        );
+        assert!(scr.pet_scrub.get());
+        scr.menu = None;
+        let mut scrubbed = String::new();
+        scr.end_row(&mut scrubbed, "back", 43, true);
+        assert!(scrubbed.contains("\x1b[K"), "closing the layer clears the old pet cells once");
+        let mut kept = String::new();
+        scr.end_row(&mut kept, "back", 43, false);
+        assert!(!kept.contains("\x1b[K"), "later dock rows leave the portrait cells alone");
+        scr.cols = 80;
+        scr.live = Some((2, "Z".repeat(80)));
+        assert_eq!(scr.stream_tail_cols(), 43);
+        let mut live = String::new();
+        scr.push_live_row(&mut live, &"Z".repeat(80), scr.dock_columns(), false);
+        assert!(!live.contains("\x1b[K"), "a streaming row must not clear into the dock");
+        assert!(!live.contains(&"Z".repeat(44)));
+        assert!(live.contains(&"Z".repeat(43)));
+        scr.draw();
+        assert!(!scr.pet_scrub.get());
+        let back = crate::pet_art::decode_ppm(&std::fs::read(&ppm).unwrap()).unwrap();
+        assert!(back.rgb.chunks(3).any(|p| p != crate::pet_art::KEY));
+        let _ = std::fs::remove_file(&ppm);
+    }
+
+    #[test]
+    fn yielding_the_panel_hides_the_pet_until_the_next_frame() {
+        let ppm = std::env::temp_dir().join(format!(
+            "dst-pet-yield-{}-{}.ppm",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let mut host = crate::pet_ui::pixel_dock_for_test();
+        crate::pet_ui::set_out_for_test(&mut host, ppm.clone());
+        let mut scr = super::Scr::new();
+        scr.rows = 12;
+        scr.cols = 53;
+        scr.art_on = false;
+        scr.splash_done = true;
+        scr.pet = Some(std::rc::Rc::new(std::cell::RefCell::new(host)));
+        scr.draw();
+        scr.yield_panel();
+        assert!(scr.pet_hidden.get());
+        let hidden = crate::pet_art::decode_ppm(&std::fs::read(&ppm).unwrap()).unwrap();
+        assert!(hidden.rgb.chunks(3).all(|p| p == crate::pet_art::KEY));
+        scr.draw();
+        assert!(!scr.pet_hidden.get());
+        let back = crate::pet_art::decode_ppm(&std::fs::read(&ppm).unwrap()).unwrap();
+        assert!(back.rgb.chunks(3).any(|p| p != crate::pet_art::KEY));
+        let _ = std::fs::remove_file(&ppm);
+    }
 
     #[test]
     fn the_prompt_teaches_planning_and_per_step_reports() {
@@ -3462,6 +3740,31 @@ fn run_once(cfg: &Cfg, reg: &[tool::ToolDef], system_prompt: &str, prompt: &str)
 /// Front end for the terminal. Draws harness events, and keeps the keyboard
 /// live while the model works: typed text is echoed, Enter queues the message
 /// for after this turn, Esc cancels.
+fn pet_note(scr: &mut Scr, ev: pet::Ev) {
+    let Some(pet) = scr.pet.clone() else { return };
+    let unlocked = pet.borrow_mut().on_event(ev);
+    for id in unlocked {
+        let name = pet_growth::achievement_name(&id);
+        scr.push(&i18n::tf("pet_ach", &[&format!("{id} {name}")]), K_DIM);
+    }
+    let err = pet.borrow().last_save_error.clone();
+    if !err.is_empty() {
+        pet.borrow_mut().last_save_error.clear();
+        scr.push(&i18n::tf("pet_save_bad", &[&err]), K_ERR);
+    }
+}
+
+fn apply_pet(scr: &mut Scr, cfg: &mut config::Config, arg: &str) {
+    let Some(pet) = scr.pet.clone() else { return };
+    let lines = pet.borrow_mut().command(arg, cfg, true);
+    for (text, kind) in lines {
+        if !text.is_empty() {
+            scr.push(&text, kind);
+        }
+    }
+    scr.pet_idle_frame();
+}
+
 struct TermUi<'a> {
     scr: &'a mut Scr,
     acc: String,
@@ -3534,6 +3837,7 @@ impl<'a> harness::Ui for TermUi<'a> {
         timeout_s: u64,
         args: &str,
     ) -> Result<String, String> {
+        self.scr.yield_panel();
         let result = crate::apps::run_on_screen_args(app, timeout_s, args);
         self.scr.draw();
         result
@@ -3541,14 +3845,24 @@ impl<'a> harness::Ui for TermUi<'a> {
 
     fn on(&mut self, ev: Ev) {
         match ev {
+            Ev::TurnStart => pet_note(self.scr, pet::Ev::TurnStart),
             Ev::Delta(d) => {
+                pet_note(self.scr, pet::Ev::Talk);
                 self.acc.push_str(&d);
-                self.scr.live = Some((2, tail_chars(&self.acc, 46)));
+                let cols = self.scr.stream_tail_cols();
+                self.scr.live = Some((2, tail_chars(&self.acc, cols)));
                 self.scr.draw();
             }
             Ev::ThinkingDelta(t) => {
+                pet_note(self.scr, pet::Ev::Thinking);
                 // Wrap incrementally: only the new characters are measured.
-                let wrap_cols = self.scr.cols.saturating_sub(2);
+                // The two-cell indent is part of the row. With the dock open
+                // that row is 43 cells, so the words wrap at 41.
+                let wrap_cols = if self.scr.dock_columns() > 0 {
+                    self.scr.transcript_width().saturating_sub(2)
+                } else {
+                    self.scr.cols.saturating_sub(2)
+                };
                 for ch in t.chars() {
                     if ch == '\n' {
                         self.think_flush();
@@ -3572,6 +3886,7 @@ impl<'a> harness::Ui for TermUi<'a> {
                 self.scr.draw();
             }
             Ev::Thinking { secs, chars } => {
+                pet_note(self.scr, pet::Ev::Thinking);
                 const FRAMES: [char; 4] = ['|', '/', '-', '\\'];
                 let f = FRAMES[self.spin % FRAMES.len()];
                 self.spin += 1;
@@ -3584,6 +3899,7 @@ impl<'a> harness::Ui for TermUi<'a> {
                 self.scr.draw();
             }
             Ev::ThinkingDone { secs, chars } => {
+                pet_note(self.scr, pet::Ev::ThinkingDone);
                 let had_lines = !self.scr.think_lines.is_empty();
                 self.reset_think();
                 self.scr.live = None;
@@ -3595,6 +3911,7 @@ impl<'a> harness::Ui for TermUi<'a> {
                 }
             }
             Ev::Assistant(t) => {
+                pet_note(self.scr, pet::Ev::TalkDone);
                 self.reset_think();
                 self.acc.clear();
                 self.scr.live = None;
@@ -3603,6 +3920,7 @@ impl<'a> harness::Ui for TermUi<'a> {
                 self.scr.push_md(&t);
             }
             Ev::ToolCall { id, name, title, args } => {
+                pet_note(self.scr, pet::Ev::ToolCall(name.clone()));
                 self.reset_think();
                 self.scr.live = None;
                 if self.scr.turn_tools.len() < 200 {
@@ -3619,13 +3937,25 @@ impl<'a> harness::Ui for TermUi<'a> {
                 // about to take over the whole screen, so only its title is
                 // worth a card line.
                 self.scr.push(&format!("* {name}"), K_TOOL);
-                let cols = self.scr.cols;
+                let shown = if self.scr.dock_columns() > 0 {
+                    self.scr.transcript_width()
+                } else {
+                    self.scr.cols
+                };
                 if name == "artifact" {
                     if !title.is_empty() {
-                        self.scr.push(&fit(&format!("  {title}"), cols), K_DIM);
+                        self.scr.push(&fit(&format!("  {title}"), shown), K_DIM);
                     }
                 } else {
-                    for line in expand_args(&args, cols, 5) {
+                    // expand_args keeps one spare cell. With the dock open,
+                    // pass 44 so the card fills the 43-column text. Without
+                    // a dock, pass the pty width and the spare cell stays.
+                    let arg_width = if self.scr.dock_columns() > 0 {
+                        shown.saturating_add(1)
+                    } else {
+                        shown
+                    };
+                    for line in expand_args(&args, arg_width, 5) {
                         self.scr.push(&line, K_DIM);
                     }
                 }
@@ -3637,10 +3967,12 @@ impl<'a> harness::Ui for TermUi<'a> {
             }
             Ev::ToolResult {
                 id,
+                name,
                 content,
                 is_error,
                 ..
             } => {
+                pet_note(self.scr, pet::Ev::ToolResult { name: name.clone(), is_error });
                 self.scr.live = None;
                 // The pending line was drawn when the call started; this one
                 // adds the outcome and a short preview of what came back.
@@ -3665,7 +3997,11 @@ impl<'a> harness::Ui for TermUi<'a> {
                     is_error,
                     secs: took,
                 });
-                let cols = self.scr.cols;
+                let cols = if self.scr.dock_columns() > 0 {
+                    self.scr.transcript_width()
+                } else {
+                    self.scr.cols
+                };
                 // When sibling tools are still running in parallel, tag the
                 // settled line with the tool name so out-of-order completion
                 // stays readable on the 53-col panel.
@@ -3699,6 +4035,7 @@ impl<'a> harness::Ui for TermUi<'a> {
             }
             Ev::Context(c) => self.scr.push(&context_marker(&c), K_DIM),
             Ev::Compacting { tokens, messages } => {
+                pet_note(self.scr, pet::Ev::Compact);
                 self.reset_think();
                 self.scr.live = Some((
                     1,
@@ -3710,13 +4047,21 @@ impl<'a> harness::Ui for TermUi<'a> {
                 self.scr.draw();
             }
             Ev::CompactingDone { ok, note } => {
+                pet_note(self.scr, pet::Ev::CompactDone { ok });
                 self.scr.live = None;
                 if !ok {
                     self.scr.push(&i18n::tf("ui_compaction_failed", &[&note]), K_DIM);
                 }
             }
             Ev::StateReport(t) => self.scr.set_state(t),
-            Ev::TurnEnd { .. } => {
+            Ev::TurnEnd { fate, .. } => {
+                let end = match fate {
+                    harness::TurnFate::Failed => pet::End::Failed,
+                    harness::TurnFate::Cancelled => pet::End::Cancelled,
+                    harness::TurnFate::Limited => pet::End::Limited,
+                    harness::TurnFate::Done => pet::End::Done,
+                };
+                pet_note(self.scr, pet::Ev::TurnEnd(end));
                 self.scr.flush_state();
                 self.scr.draw();
             }
@@ -3991,6 +4336,10 @@ impl<'a> harness::Ui for TermUi<'a> {
     }
 
     fn pump(&mut self) -> Action {
+        if crate::fb::shutdown_requested().is_some() {
+            self.interrupted = true;
+            return Action::Cancel;
+        }
         if self.scr.artifact.is_some() {
             // Non-blocking drain so an open `/btw` or artifact panel never
             // stalls the background turn with 300ms blocking waits.
@@ -4055,6 +4404,7 @@ impl<'a> harness::Ui for TermUi<'a> {
                     // step instead of only cancelling the tool in flight. Chat
                     // text typed so far becomes the next message; a command is
                     // executed/refused with the same busy-time rules.
+                    pet_note(self.scr, pet::Ev::Esc);
                     crate::voice::request_stop();
                     let line: String = self.scr.input.iter().collect();
                     let line = line.trim().to_string();
@@ -4356,6 +4706,10 @@ impl<'a> TermUi<'a> {
             crate::voice::request_stop();
             self.scr.quit = true;
             self.interrupted = true;
+        }
+        if let Some(arg) = out.pet {
+            let mut guard = self.cfg_rc.borrow_mut();
+            apply_pet(self.scr, &mut guard, &arg);
         }
         // Anything that owns the screen or rewrites history is never allowed
         // here (classification should prevent it; this is the belt-and-braces
@@ -7105,7 +7459,7 @@ fn apps_menu(scr: &mut Scr, config_rc: &ConfigRc) -> AppsAction {
                         continue;
                     }
                     scr.menu = None;
-                    scr.draw();
+                    scr.yield_panel();
                     match crate::apps::run_on_screen_args(
                         &app,
                         crate::apps::DIRECT_TIMEOUT_S,
@@ -7261,12 +7615,14 @@ fn main() {
     // sequences: restore the terminal first, then report.
     std::panic::set_hook(Box::new(|info| {
         use std::io::Write as _;
+        crate::fb::restore_saved_panel();
         crate::stty_tty(&["sane", "min", "1", "time", "0"]);
         let mut o = std::io::stdout();
-        let _ = o.write_all(b"\x1b[0m\x1b[?25h\x1b[2J\x1b[H");
+        let _ = o.write_all(b"\x1b[0m\x1b[?25h");
         let _ = o.flush();
         eprintln!("dst: internal error: {info}");
     }));
+    crate::fb::install_shutdown_signals();
 
     // Host/device debug entry points for the real DSH login flow.
     let argv: Vec<String> = std::env::args().collect();
@@ -7284,6 +7640,12 @@ fn main() {
             if cfg!(debug_assertions) { "debug" } else { "release" }
         );
         return;
+    }
+    if argv.get(1).map(|s| s.as_str()) == Some("--pet-preview") {
+        std::process::exit(pet_ui::preview(&argv));
+    }
+    if argv.get(1).map(|s| s.as_str()) == Some("--pet-demo") {
+        std::process::exit(pet_ui::demo(&argv));
     }
     if argv.iter().any(|a| a == "--dsh-login-test") {
         let port = 7788u16;
@@ -7544,6 +7906,9 @@ start another one in a different terminal or tmux window"
     crate::apps::set_screen_available(true);
     crate::ask::set_screen_available(true);
 
+    scr.pet = Some(std::rc::Rc::new(std::cell::RefCell::new(pet_ui::Host::boot(
+        &config_rc.borrow(),
+    ))));
     scr.seed_splash(&cfg.model);
     onboarding(&mut scr, &config_rc);
     maybe_show_tips(&mut scr, &config_rc);
@@ -7675,6 +8040,10 @@ start another one in a different terminal or tmux window"
                 }
                 for (text, kind) in out.lines {
                     scr.push(&text, kind);
+                }
+                if let Some(arg) = out.pet.clone() {
+                    let mut guard = config_rc.borrow_mut();
+                    apply_pet(&mut scr, &mut guard, &arg);
                 }
                 if out.quit {
                     break;
@@ -7832,6 +8201,7 @@ start another one in a different terminal or tmux window"
                 if let Some(name) = out.run_app.clone() {
                     match crate::apps::find(&name) {
                         Some(app) => {
+                            scr.yield_panel();
                             match crate::apps::run_on_screen(&app, crate::apps::DIRECT_TIMEOUT_S) {
                                 Ok(_) => scr.push(
                                     &i18n::tf("apps_exited", &[&app.label()]),
@@ -8171,7 +8541,15 @@ start another one in a different terminal or tmux window"
     }
     crate::bg::shutdown();
     crate::mcp::shutdown();
+    if let Some(pet) = &scr.pet {
+        pet.borrow_mut().conceal();
+    }
     raw_mode(false);
+    if let Some(sig) = crate::fb::shutdown_requested() {
+        let _ = std::io::stdout().write_all(b"\x1b[0m\x1b[?25h");
+        let _ = std::io::stdout().flush();
+        std::process::exit(128 + sig);
+    }
     let _ = std::io::stdout().write_all(b"\x1b[0m\x1b[2J\x1b[H");
     println!("bye");
 }

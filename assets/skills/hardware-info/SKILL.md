@@ -73,7 +73,7 @@ These are the pinned "known good" values for the shipping image; the scan sectio
 | Build/deploy | CMake >= 3.31 + SCons + aarch64 cross toolchain; apps are arm64 `.deb` installed under `/usr/share/APPLaunch` |
 | Audio stack | PipeWire + WirePlumber per-user session, factory default sink volume 60% (0.216 linear); `pulseaudio-utils` |
 | Network stack | NetworkManager (Wi-Fi), `bluez`, `avahi-daemon`, OpenSSH; factory cmdline sets `cfg80211.ieee80211_regdom=AE`; WLAN blocked until a country is set |
-| Host identity | hostname `cardputerzero`; build defaults user `pi`/`raspberry` (M5 Imager/OOBE can change it); this dst unit is `hanxiao` (deploy target `hanxiao@192.168.43.49`) |
+| Host identity | image default hostname `cardputerzero`, user `pi` (M5 Imager/OOBE can change both). A measured unit's hostname and login are operator-specific; do not copy them into a deploy default. `hanxiao` is the upstream fork author, not a device account. |
 | `config.txt` | `gpu_mem=128`, `splash_screen=CardputerZero_splash_custom.bin`, `dtoverlay=vc4-kms-v3d,cma-64`, `max_framebuffers=2`, `dtparam=i2c_arm/i2s/spi=on`, `dtparam=audio=off`, `camera_auto_detect=0` + `dtoverlay=imx219`, `enable_uart=1`, `dtoverlay=dwc2`, V0.5 overlays `cardputerzero-v5-overlay`, `bq27220_v5`, `bmi270_bmm150_overlay`, `gpio-ir` (GPIO13), `gpio-ir-tx` (GPIO12) |
 | `cmdline.txt` | `quiet fbcon=map:off cfg80211.ieee80211_regdom=AE` plus Raspberry Pi root=PARTUUID defaults; serial console deliberately removed |
 | Services | `LaunchWizard.service` (root, first-boot OOBE + keyboard guide), `APPLaunch.service` (user unit, `After=pipewire-pulse.service`), `fb_load.service`, `ssh.service`, `avahi-daemon`, `rtkit-daemon`, `pipewire*`; `systemd-backlight@backlight:backlight` masked; ADB (`adbd`, `cardputer-adb-hotplug`) installed but off by default; journald persistent, 50 MB cap |
@@ -165,7 +165,9 @@ These are the pinned "known good" values for the shipping image; the scan sectio
 ## How dst talks to the hardware
 
 - **Panel**: `cpzterm.service` starts fbterm on tty1 and runs `dst` inside it; dst owns the tty. An app started by `app_run` inherits the same
-  stdout/stdin and must stay inside 53x12 cells. Never open `/dev/fb*`, `/dev/dri/*` or APPLaunch from inside dst - the panel belongs to fbterm.
+  stdout/stdin and must stay inside 53x12 cells. Apps must never open `/dev/fb*`, `/dev/dri/*` or APPLaunch — the panel belongs to fbterm.
+  dst's own whale-girl pet is the exception: it paints only after sysfs says the node is 16bpp and 320×170, and only into `/dev/fb_lcd`,
+  `/dev/fb_panel`, or a path the user set with `pet.fb` / `DST_FB`. It does not open an unidentified `/dev/fbN`.
 - **Keys**: a normal Linux console keyboard. The fn layer already emits arrow/paging keycodes, which the VT turns into `ESC[A`..`ESC[D`,
   `ESC[5~`/`ESC[6~`; long Esc is the platform back/HOME action. dst decodes sequences, apps read plain bytes.
 - **Audio**: `arecord`/`aplay` with `-D hw:CARD=ES8389Audio,DEV=0` (dst uses these for ASR/TTS); remember the ~0.5 s unmute pad on capture.
