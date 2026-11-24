@@ -137,3 +137,143 @@
 - 需要 Grok 修复：B1（重画或明确改为资源包优先）、B2、H1–H4、M1、M2、M4–M6、P3 各项、M3 的文档表述、M8 的声明（若用户同意）。
 - 只需真机验证：M7 的设备节点选择、字节序、stride、双缓冲、fbterm 并发闪烁与残字、FPS；ARM 产物在设备 glibc 上运行。
 - 必须用户决定：内置形象是否接受「原创简化像素」路线，还是向作者取得立绘授权后做资源包；宠物默认开启还是关闭；是否附 MIT 声明。
+
+# 实现后复核：`ca1b2b9`（Grok 4.7）
+
+这一节是修复提交之后的复核，执行者是 Grok 4.7。它不是 Opus 独立验收，也不把实现报告里的自测当成证据。
+上面 eb0ee76 的结论保持原样。
+
+复核对象：`ca1b2b9fc638633268e58dfb0031c0e3eeb31610`（与 `origin/cursor/dsh-whale-pet-design-5cf2` 一致）。
+环境：x86_64 云端 VM。没有连接 192.168.31.244，没有打开设备 framebuffer，没有安装服务，没有运行 `tools/deploy/deploy.sh`。
+渲染用的是该提交的 debug 构建，资源包是 `/opt/cursor/artifacts/pet-pack-debug`，离屏输出是 `DST_PET_FB_OUT`，更新检查由 `DST_NO_UPDATE_CHECK=1` 关掉。模拟器是仓库里的 `tools/sim/screen_sim.py`。
+
+## 结论
+
+原 P0/P1 里，审批、菜单、提问、QR 文字层、artifact 会清掉宠物像素；命令输出不再被空闲房间盖住；API 失败和 Esc 取消不再记成成功；计数会落盘；导入要 `confirm`、会备份、会拒超限；`Task-master` 可以存；侧栏打开时落定正文按 43 列折行。这些有这次的代码阅读和运行记录。
+
+整项仍不能写成通过。内置形象和字符兜底还不是鲸鱼娘。调试资源包的生产渲染可以认出蓝发女仆和鲸尾，侧栏缩图细节变粗，不能写成无损。保存的小程序占屏时像素层不让路。`usageStats` 的数字计数可以往返，字符串和小数不会原样留下。步数上限仍记成功。流式回复预览仍截最后 46 字。若干工具道具在深色侧栏上几乎看不见。本轮没有在设备上画过一帧。
+
+可以进入用户已经授权的「临时目录 + timeout + 关闭自动更新」试运行，但不要按 `TRIAL.txt` 原文使用 dylan 的家目录。画面、闪烁、RGB565 字节序都还没在设备上验过。
+
+## 逐项
+
+| 项 | 结论 | 这次的证据 |
+| --- | --- | --- |
+| 审批清层 | 通过 | `sandbox_strict`，宠物开启。弹窗文字完整，侧栏没有鲸鱼娘。`/opt/cursor/artifacts/review-ca1b2b9/approval.png` |
+| 菜单清层与关闭恢复 | 通过 | `/help` 全屏菜单没有宠物；Esc 后侧栏回来，记录里没有菜单标题残留。`help-menu.png`、`help-closed.png`。单测 `an_overlay_conceals_the_pet_and_the_next_frame_paints_it` 通过：菜单帧 PPM 全是品红键色，关闭后下一帧再画上 |
+| 提问清层 | 通过 | `ask_user` 的 “Pick build mode:” 全屏，没有宠物。`ask-overlay.png` |
+| QR | 部分 | 登录菜单和二维码说明文字层没有宠物，`login-menu.png`、`qr-guide.png`。本机没有 framebuffer，`draw_qr_fb` 失败后走文字说明，没有画出二维码点阵。点阵是否盖住宠物、关闭后是否擦掉，都还没在设备上看到 |
+| artifact 清层与关闭 | 通过 | “Check panel” 三行全文可见，没有宠物；Esc 后回到对话并重新画出侧栏。`artifact.png`、`artifact-closed.png` |
+| 小程序占屏 | 不通过 | `creator_apps_run` 的 QUICK APP 输出旁边仍画着鲸鱼娘。`app-run-pet-still-visible.png`。`apps::run_on_screen_args` 清的是终端，返回后只 `scr.draw()`，没有 `conceal()` |
+| 命令输出不被房间挡住 | 通过 | 已看过提示的启动进空闲房间；`/pet stats` 的等级和心情留在画面上。`room-pack.png`、`command-visible.png`。未看过提示时先显示文字提示，不进房间，这是原来的引导，不是房间把输出盖住 |
+| API 失败 | 通过 | 401 后画面是 `achievement: first-failure`，不是成功。`api-failure.png`。该场景随后的恢复回合才把 `successes` 记成 1，同时 `failures` 为 1 |
+| Esc 取消 | 通过 | 取消帧只有 “cancelled”，没有成功成就。`cancelled.png`。存档里的 1 次成功来自后面那条 “are you there” |
+| 步数上限 | 不通过 | `max_steps: 1` 打出 “step limit reached”，同时 `first-success`，存档 `successes: 1`。`run_turn` 只在 `report.cancelled` / `report.failed` 时改变命运，步数上限两个都不置位，于是落到 `TurnFate::Done` |
+| 计数落盘 | 通过 | 摸头单测重载后 `pats == 1`，写失败时输出里有 “could not save”。工具回合结束后 `pet.json` 里有 `tools: 1`。写失败会留在 `last_save_error` |
+| 导入 confirm / 备份 / 限额 | 通过，有剩余 | 单测：不带 `confirm` 不改存档；带上之后写入，并把旧档复制到 `pet.json.bak`（代码里权限 0600）。`reject_oversized(200_001)` 拒绝，`200_000` 放行。剩余：大小先看 metadata 再整文件读入，写入窗口里变大的文件仍会读进内存；备份只有一份，下次导入覆盖；路径按空白切分，带空格的路径对不上 |
+| Task-master | 通过 | 单测导入标题 `Task-master` 并成功 `store_file`。旧的整文件 `sk-` 扫描已换成字段白名单 |
+| usageStats | 部分 | 数字键可以往返：`successes` / `failures` / `pat` / `keywords`，以及未知数字键 `streak`。导出不再写旧名 `success` / `pats`。参考 `whale-moe-core.js` 的 `portableParse` 能保留这些数字，也能保留字符串 `note`。本仓 `usage_from` 只收数字，探针测试确认 `note` 被丢掉、`1.9` 被截成 `1`。这不是原样保真 |
+| 43 列 | 通过，有剩余 | pty 报 49 列时，落定的 80 个 `Z` 分成 43 + 37。`wrap-43.png`。单测 `dock_text_wraps_at_43_even_when_the_pty_is_narrower` 通过。流式预览仍是 `tail_chars(&self.acc, 46)`，生成过程中最后 46 字会伸进侧栏 3 列；落定后的正文才是 43 |
+| 资源包辨识度 | 部分通过 | 房间 3 倍生产渲染能看出长蓝发、女仆头饰、白围裙和鲸尾。`room-pack.png`。侧栏是 28×32 放大 2 倍，五官变粗，不能写成和原图一样清晰。没有用内置简化小人代替这组截图 |
+| 内置形象 / 字符兜底 | 不通过 | 没有资源包或 `render: text` 时，空闲画面仍是 `art.rs` 的字符鲸，不是少女。`text-fallback.png`。`TEXT_IDLE` 仍是圆形鲸。像素模式在包缺失时回落 `pet_sprites.rs` 的简化蓝发图 |
+| 工具状态 | 部分 | 真实 bash 回合在侧栏右侧画出一块绿色方块，身体姿势不变。`tool-shell.png`。同一条生产 `render` 画出的 10 个道具里，shell / write / plan / note / ask 看得见；read、clock、gear 是深色，压在深色底上几乎看不见；artifact 对应空道具。`tool-props.png`。状态条仍是粉、橙、蓝加 `L1`，没有文字 |
+| 许可证归属 | 文件在，授权范围没有新证据 | 提交里有 `third_party/dsh-whale-musume/LICENSE` 和 `NOTICE`。资源包里也有。9 张上游 webp 的 SHA-256 与 `PROCESSING.json` 一致，来源修订 `2d35234a7a01b18bdb3ad6c32e646b3d10e87828`。NOTICE 写明非官方，且生成器条款没有找到。这次没有把 92 张原图放进 git |
+
+## 清层实现里看到的边界
+
+`Scr::draw` 在 approval、ask、menu、qr、artifact 任一存在时调用一次 `Host::conceal`：离屏 PPM 涂成品红键色，真面板则整屏填黑。之后这些层提前返回，不再 `present()`。QR 在 `qr_blit` 已为真时连文字层也不重画，避免把刚贴上的点阵涂黑。正常退出会再 `conceal()` 然后 `stty sane`。
+
+没有信号处理器。`timeout` 发来的 SIGTERM 不会走到这段退出代码，终端可能停在 raw，面板上的最后一帧也不会被这段代码擦掉。
+
+`/btw` 走 artifact 层，所以被上面的清层盖住。保存的小程序不走这条路径。
+
+## 制品
+
+本轮没有替换这些文件：
+
+- `/opt/cursor/artifacts/dst-linux-aarch64`
+- `/opt/cursor/artifacts/pet-pack-debug.tar.gz`
+- `/opt/cursor/artifacts/TRIAL.txt`
+- `/opt/cursor/artifacts/pet-pack-debug/`
+
+aarch64 二进制这次重新量过：
+
+- SHA-256 `af8c3e1108d824ed9d4b4636fe799e7b5f23690c0d658c426cecefb7200efc09`
+- 1,777,344 字节
+- ELF 64-bit LSB pie，ARM aarch64，解释器 `/lib/ld-linux-aarch64.so.1`，已 strip
+- 动态符号最高到 `GLIBC_2.29`（`posix_spawn_file_actions_addchdir_np`）。其余是 2.17、2.18、2.25、2.27、2.28
+- 用户量到的设备是 Debian 13.7、aarch64、glibc 2.41。需要的符号版本都低于 2.41，按符号看可以加载
+- 本机没有 `qemu-aarch64`，这个二进制没有被执行。能加载不等于已经在设备上跑起来
+
+资源包：
+
+- tar SHA-256 `66ed9a093d520ecfb708085172b239d94601cf9e9ac63d2dc52588e63819e94e`
+- 22 个成员，没有符号链接，没有 `..` 或绝对路径
+- 目录模式 0777，文件 0666。解到多人可写的目录时，别人可以改这些文件
+- 含 `idle.ppm`（P6，168×192，品红键色）以及另外 8 个姿态 PPM、LICENSE、NOTICE、PROCESSING.json，还有 9 张裁切后的 source PNG。不是 92 张原图
+- 程序认 `DST_PET_PACK`，否则 `~/.dst/pet-pack`。目录不存在就用内置图。目录在但没有 `idle.ppm` 会报错
+- 试运行要同时带上 `DST_PET_PACK=/tmp/dst-pet-pack`。只拷二进制不会出现这组鲸鱼娘
+
+面板代码与用户量到的设备：
+
+- `panel-mipi-dbid` 含 `mipi`，`name_is_panel` 接受。单测 `the_measured_panel_is_accepted_and_a_double_buffer_is_not` 通过
+- `geometry_ok` 接受 16bpp、320×170、stride 640，拒绝虚拟高度 340
+- 显式 `DST_FB=/dev/fb_lcd` 仍要过几何检查。`/dev/fb_lcd` 指向 fb0 时，按现有 sysfs 匹配可以找到这块屏
+- 用户名 dylan。`config::home()` 在没有 `HOME` 时落到临时目录，不再写死 `/home/hanxiao`。hanxiao 只作为上游作者留在文档里
+- RGB565 仍是小端，没有在设备上写过，不能据此说颜色正确
+
+## 测试
+
+- `cargo test --bin dst -- --test-threads=1`，跳过两条后台用例：151 过，1 败。失败的是 `checkpoint::tests::same_second_checkpoints_do_not_overwrite`（期望 2，得到 1）。单独再跑，这次提交和基线 `1059561` 都通过。与上一节记录的按秒取名的不稳定一致，不归因这次宠物修复。
+- 这两条后台测试用 `setsid` 跑：`jobs_run_wait_and_kill`、`watcher_lines_are_queued`，2/2 通过。
+- `node tools/sim/check_pet_migration.mjs` 对 `/tmp/ref-up/assets/whale-moe-core.js`：通过，WM1 与参考 `portableCode` 字节一致。该脚本不覆盖 `usageStats`。
+- 另外两条只在临时工作区编译、没有提交的探针：非数字 `usageStats` 被丢弃；10 个道具帧写到 `/tmp/rv/props`。
+- 宠物默认关闭、`DST_NO_UPDATE_CHECK=1`：`goal_manage` 和 `sandbox_full` 在本提交与基线 `1059561` 上以相同检查项失败（`only one round was spent`、`bottom-right badge shows the paused budget`、`round cap stops automatic continuation`；`the dangerous command really executed`）。不归因这次修复。`long_input` 这次在两边都通过。上一节记录它曾经失败，这次没有复现。
+
+## TRIAL.txt
+
+原文做到了这些：二进制和资源包只进 `/tmp`，不调用 `deploy.sh`，不安装到 `/usr/local/bin`，不起服务。`DST_NO_UPDATE_CHECK=1` 和 `DST_PET_TRIAL=1` 在 `update::enabled` 里都会关掉自更新。`DST_FB=/dev/fb_lcd` 指向用户量到的那块屏。
+
+原文没有做到「不读秘密、不改用户文件」：
+
+- 没有设置 `HOME`。进程用 dylan 的家目录，会读 `~/.dst` 里的配置和密钥文件。
+- 一次启动就会写 `~/.dst/config.yml`、`history`、`sessions`、`skills/hardware-info`、`pet.json`。这次在模拟器的临时家目录里看到了这些文件。
+- `pet.enabled` 默认仍是 false。按原文启动，除非 dylan 的配置里已经打开，否则看不到宠物。
+- `timeout 120s` 的 SIGTERM 不会跑 `conceal()`，也不会 `stty sane`。
+
+所以原文还不能直接拿去跑。建议主协调改用下面的临时家目录，跑完在同一个终端执行 `stty sane`。这只是验收记录，本轮没有改产品代码，也没有去连那台机器。
+
+```
+mkdir -p /tmp/dst-home/.dst
+# 在这个新家目录放一份不含真实密钥的 config.yml，并写上 pet.enabled: true
+chmod 755 /tmp/dst-trial
+HOME=/tmp/dst-home timeout 120s env \
+  DST_NO_UPDATE_CHECK=1 \
+  DST_PET_TRIAL=1 \
+  DST_PET_PACK=/tmp/dst-pet-pack \
+  DST_FB=/dev/fb_lcd \
+  /tmp/dst-trial
+stty sane
+```
+
+不要在试运行里发需要真实 API 的对话，否则会按那份配置联网。本轮没有做这次设备绘制，不能把画面或闪烁写成通过。
+
+## 仍须实机看的
+
+- `/dev/fb_lcd` 实际打开、16bpp 小端颜色、stride 640 的每一行、有没有写到别的 framebuffer
+- conceal 的整屏填黑和 fbterm 重绘会不会闪，关闭菜单后 43–52 列有没有残字
+- 二维码点阵贴上之后，宠物有没有留在点阵下面；退出和 SIGTERM 之后面板和终端是否恢复
+- aarch64 二进制在 Debian 13.7 上能否启动
+- 侧栏 56×64 在真实 320×170 屏上是否还认得出
+- 临时家目录试运行有没有碰到 `/usr/local/bin` 或 cpzterm。用户之前的查找不是全盘搜索，不能断言没有别的安装位置
+
+## 截图
+
+都在 `/opt/cursor/artifacts/review-ca1b2b9/`。来自上述生产路径，不是另画的图，也不是真机照片。
+
+- `ask-overlay.png`、`qr-guide.png`、`login-menu.png`、`approval.png`、`artifact.png`
+- `help-menu.png`、`help-closed.png`、`room-pack.png`、`command-visible.png`
+- `wrap-43.png`、`api-failure.png`、`cancelled.png`
+- `app-run-pet-still-visible.png`（未通过）
+- `text-fallback.png`（字符鲸，未通过）
+- `tool-shell.png`、`tool-props.png`、`contact.png`
