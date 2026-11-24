@@ -1,0 +1,15 @@
+model: deepseek-flash
+effort: auto
+max_tokens: 512
+api:
+  key: test
+context:
+  time: false
+tui:
+  language: en
+
+pet:
+  enabled: true
+  dock: true
+  room: true
+  render: pixel

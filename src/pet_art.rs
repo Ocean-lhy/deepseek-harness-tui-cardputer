@@ -77,6 +77,7 @@ pub fn palette(ch: char) -> Option<[u8; 3]> {
     })
 }
 
+#[cfg(test)]
 fn builtin(pose: &str) -> &'static [&'static str] {
     match pose {
         "blink" => BLINK,
@@ -91,8 +92,10 @@ fn builtin(pose: &str) -> &'static [&'static str] {
     }
 }
 
-/// Character-mode portrait. Every glyph is single-width (ASCII or U+2500–259F)
-/// so it can sit in an fbterm cell. Nine rows, like the splash.
+/// Character-mode whale girl. Hair, two eyes, a dress and a tail flick.
+/// Every glyph is single-width (ASCII or U+2500–259F) so it fits an fbterm
+/// cell. Nine rows, like the splash. This is the portrait used when the
+/// original pack is missing; the simplified pixel girl is not drawn instead.
 pub fn text_rows(pose: &str) -> &'static [&'static str] {
     match pose {
         "sleep" | "sad" => TEXT_SLEEP,
@@ -102,39 +105,39 @@ pub fn text_rows(pose: &str) -> &'static [&'static str] {
 }
 
 const TEXT_IDLE: &[&str] = &[
-    "                    .                  ",
-    "                 ▄▄███▄▄               ",
-    "               ▄█████████▄             ",
-    "              ██  ▀▄ ▄▀  ██            ",
-    "              ██    ▀    ██            ",
-    "               ▀██▄▄▄▄██▀              ",
-    "                 ▀█▀▀█▀                ",
-    "                ▀▀    ▀▀               ",
-    "▁▁▂▁▁▁▁▂▁▁▁▁▁▁▂▁▁▁▁▁▂▁▁▁▁▁▁▂▁▁▁▁▁▂▁▁▁▁▁",
+    "               .-''''-.               ",
+    "             .'        '.             ",
+    "            /   \\    /   \\            ",
+    "           |     o  o     |           ",
+    "            \\    \\__/    /            ",
+    "             '._      _.'             ",
+    "                |    |                ",
+    "               /  __  \\               ",
+    "              (__/  \\__)              ",
 ];
 
 const TEXT_HAPPY: &[&str] = &[
-    "                    .                  ",
-    "                 ▄▄███▄▄               ",
-    "               ▄█████████▄             ",
-    "              ██  ▀▄ ▄▀  ██            ",
-    "              ██   \\__/  ██            ",
-    "               ▀██▄▄▄▄██▀              ",
-    "                 ▀█▀▀█▀                ",
-    "                ▀▀    ▀▀               ",
-    "▂▃▄▄▃▂▂▁▁▂▄▅▄▂▁▁▂▃▄▃▂▁▁▂▃▂▁▁▂▃▂▁▁▁▂▃▂▁▁",
+    "               .-''''-.               ",
+    "             .'        '.             ",
+    "            /   \\    /   \\            ",
+    "           |     ^  ^     |           ",
+    "            \\    \\__/    /            ",
+    "             '._      _.'             ",
+    "                |    |                ",
+    "               /  __  \\               ",
+    "             (__/    \\__)             ",
 ];
 
 const TEXT_SLEEP: &[&str] = &[
-    "                    z                  ",
-    "                 ▄▄███▄▄               ",
-    "               ▄█████████▄             ",
-    "              ██  ▀▀ ▀▀  ██            ",
-    "              ██         ██            ",
-    "               ▀██▄▄▄▄██▀              ",
-    "                 ▀█▀▀█▀                ",
-    "                ▀▀    ▀▀               ",
-    "▁▁▂▁▁▁▁▂▁▁▁▁▁▁▂▁▁▁▁▁▂▁▁▁▁▁▁▂▁▁▁▁▁▂▁▁▁▁▁",
+    "               .-''''-.   z           ",
+    "             .'        '.             ",
+    "            /   \\    /   \\            ",
+    "           |     -  -     |           ",
+    "            \\     __     /            ",
+    "             '._      _.'             ",
+    "                |    |                ",
+    "               /  __  \\               ",
+    "              (__/  \\__)              ",
 ];
 
 /// Three-cell ASCII face for the status row when there is no pixel dock.
@@ -226,13 +229,10 @@ fn paint_dock(buf: &mut [u8], paint: &Paint, pack: Option<&Pack>) {
 }
 
 fn blit_pose(buf: &mut [u8], pack: Option<&Pack>, pose: &str, x: usize, y: usize, scale: usize) {
-    if let Some(pack) = pack {
-        if let Some(img) = pack.frame(pose).or_else(|| pack.frame("idle")) {
-            blit_image(buf, img, x, y, SPRITE_W * scale, SPRITE_H * scale);
-            return;
-        }
+    let Some(pack) = pack else { return };
+    if let Some(img) = pack.frame(pose).or_else(|| pack.frame("idle")) {
+        blit_image(buf, img, x, y, SPRITE_W * scale, SPRITE_H * scale);
     }
-    blit_rows(buf, builtin(pose), x, y, scale);
 }
 
 fn blit_prop(buf: &mut [u8], name: &str, x: usize, y: usize, scale: usize) {
@@ -343,6 +343,13 @@ pub struct Pack {
 }
 
 impl Pack {
+    #[cfg(test)]
+    pub fn from_idle_pixel() -> Self {
+        Self {
+            frames: vec![("idle".into(), Image { w: 1, h: 1, rgb: vec![255, 255, 255] })],
+        }
+    }
+
     pub fn frame(&self, name: &str) -> Option<&Image> {
         self.frames.iter().find(|(n, _)| n == name).map(|(_, i)| i)
     }
@@ -352,7 +359,8 @@ impl Pack {
 }
 
 /// Load `dir/idle.ppm` and any other `<pose>.ppm`. A missing directory is not
-/// an error: the built-in girl is used. A directory that exists but holds no
+/// an error: the screen falls back to the character whale girl and does not
+/// draw the simplified builtin sprite. A directory that exists but holds no
 /// readable frame is an error so the user learns the pack was not picked up.
 pub fn load_pack(dir: &std::path::Path) -> Result<Option<Pack>, String> {
     if !dir.is_dir() {
@@ -473,7 +481,9 @@ mod tests {
 
     #[test]
     fn the_girl_is_not_a_whale_silhouette() {
-        // Hair pixels sit above the face, and a tail notch splits the flukes.
+        // The simplified frames stay in the tree so the old data can be told
+        // apart from a whale. They are not blitted when the pack is missing.
+        let _kept = builtin("idle");
         assert!(IDLE[0].contains('d') || IDLE[1].contains('d'), "hair");
         assert!(IDLE[9].contains('k') || IDLE[10].contains('k'), "eyes");
         assert!(IDLE[30].contains('.'), "tail notch");
@@ -492,8 +502,26 @@ mod tests {
                     row.chars().all(|c| c.is_ascii() || ('\u{2500}'..='\u{259f}').contains(&c)),
                     "{pose} wide glyph: {row}"
                 );
+                assert!(!row.contains("▄▄███▄▄"), "the old character whale is not the portrait");
             }
+            assert!(
+                rows.iter().any(|r| r.contains('o') || r.contains('^') || r.contains('-')),
+                "{pose} has a face"
+            );
+            assert!(rows[8].contains('(') && rows[8].contains(')'), "{pose} keeps the tail");
         }
+    }
+
+    #[test]
+    fn a_missing_pack_does_not_draw_the_builtin_girl() {
+        let buf = render(&Paint::new(Scene::Dock, "idle".into(), "".into()), None);
+        let hair = [37, 72, 168];
+        assert!(
+            buf.chunks(3).all(|p| p != hair),
+            "without the original pack the simplified blue hair must not appear"
+        );
+        let room = render(&Paint::new(Scene::Room, "idle".into(), "".into()), None);
+        assert!(room.chunks(3).all(|p| p != hair));
     }
 
     #[test]

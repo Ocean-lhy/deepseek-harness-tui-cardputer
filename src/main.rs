@@ -414,6 +414,27 @@ impl Scr {
         if dock > 0 { dock } else { self.cols.min(PANEL_COLS) }
     }
 
+    /// Columns a streaming tail may use. The dock is 43 cells, not the pty width.
+    fn stream_tail_cols(&self) -> usize {
+        if self.dock_columns() > 0 { self.transcript_width() } else { self.cols }
+    }
+
+    fn push_live_row(&self, s: &mut String, live_line: &str, dock_w: usize, scrub: bool) {
+        let width = if dock_w > 0 { dock_w } else { self.cols };
+        let shown = fit(live_line, width);
+        self.end_row(s, &shown, dock_w, scrub);
+    }
+
+    /// Hide the pet before a saved app or any other program takes the screen.
+    /// The next normal frame scrubs the cells once and paints the pet back.
+    fn yield_panel(&self) {
+        if let Some(pet) = &self.pet {
+            pet.borrow_mut().conceal();
+        }
+        self.pet_hidden.set(true);
+        self.pet_scrub.set(true);
+    }
+
     /// Finish a row. Dock rows are padded to the text width and not cleared
     /// to the edge, so the framebuffer pet in columns 43–52 is left alone.
     /// `scrub` clears those cells once after a full-screen layer, before the
@@ -929,10 +950,8 @@ impl Scr {
             } else {
                 "\x1b[90m"
             });
-            s.push_str(&fit(&live_line, self.cols));
-            s.push_str("\x1b[0m");
         }
-        s.push_str("\x1b[K\r\n");
+        self.push_live_row(&mut s, &live_line, dock_w, scrub);
 
         // ---- input line: prompt + text, with the context ring pinned right ----
         let ring = if self.ctx_window > 0 {
@@ -2345,6 +2364,10 @@ impl Scr {
 
     fn edit(&mut self) -> Option<String> {
         loop {
+            if crate::fb::shutdown_requested().is_some() {
+                self.quit = true;
+                return None;
+            }
             self.draw();
             if self.qr.is_some() {
                 match self.read_key_timeout() {
@@ -2898,8 +2921,46 @@ mod inline_tests {
         let mut kept = String::new();
         scr.end_row(&mut kept, "back", 43, false);
         assert!(!kept.contains("\x1b[K"), "later dock rows leave the portrait cells alone");
+        scr.cols = 80;
+        scr.live = Some((2, "Z".repeat(80)));
+        assert_eq!(scr.stream_tail_cols(), 43);
+        let mut live = String::new();
+        scr.push_live_row(&mut live, &"Z".repeat(80), scr.dock_columns(), false);
+        assert!(!live.contains("\x1b[K"), "a streaming row must not clear into the dock");
+        assert!(!live.contains(&"Z".repeat(44)));
+        assert!(live.contains(&"Z".repeat(43)));
         scr.draw();
         assert!(!scr.pet_scrub.get());
+        let back = crate::pet_art::decode_ppm(&std::fs::read(&ppm).unwrap()).unwrap();
+        assert!(back.rgb.chunks(3).any(|p| p != crate::pet_art::KEY));
+        let _ = std::fs::remove_file(&ppm);
+    }
+
+    #[test]
+    fn yielding_the_panel_hides_the_pet_until_the_next_frame() {
+        let ppm = std::env::temp_dir().join(format!(
+            "dst-pet-yield-{}-{}.ppm",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let mut host = crate::pet_ui::pixel_dock_for_test();
+        crate::pet_ui::set_out_for_test(&mut host, ppm.clone());
+        let mut scr = super::Scr::new();
+        scr.rows = 12;
+        scr.cols = 53;
+        scr.art_on = false;
+        scr.splash_done = true;
+        scr.pet = Some(std::rc::Rc::new(std::cell::RefCell::new(host)));
+        scr.draw();
+        scr.yield_panel();
+        assert!(scr.pet_hidden.get());
+        let hidden = crate::pet_art::decode_ppm(&std::fs::read(&ppm).unwrap()).unwrap();
+        assert!(hidden.rgb.chunks(3).all(|p| p == crate::pet_art::KEY));
+        scr.draw();
+        assert!(!scr.pet_hidden.get());
         let back = crate::pet_art::decode_ppm(&std::fs::read(&ppm).unwrap()).unwrap();
         assert!(back.rgb.chunks(3).any(|p| p != crate::pet_art::KEY));
         let _ = std::fs::remove_file(&ppm);
@@ -3776,6 +3837,7 @@ impl<'a> harness::Ui for TermUi<'a> {
         timeout_s: u64,
         args: &str,
     ) -> Result<String, String> {
+        self.scr.yield_panel();
         let result = crate::apps::run_on_screen_args(app, timeout_s, args);
         self.scr.draw();
         result
@@ -3787,7 +3849,8 @@ impl<'a> harness::Ui for TermUi<'a> {
             Ev::Delta(d) => {
                 pet_note(self.scr, pet::Ev::Talk);
                 self.acc.push_str(&d);
-                self.scr.live = Some((2, tail_chars(&self.acc, 46)));
+                let cols = self.scr.stream_tail_cols();
+                self.scr.live = Some((2, tail_chars(&self.acc, cols)));
                 self.scr.draw();
             }
             Ev::ThinkingDelta(t) => {
@@ -3995,6 +4058,7 @@ impl<'a> harness::Ui for TermUi<'a> {
                 let end = match fate {
                     harness::TurnFate::Failed => pet::End::Failed,
                     harness::TurnFate::Cancelled => pet::End::Cancelled,
+                    harness::TurnFate::Limited => pet::End::Limited,
                     harness::TurnFate::Done => pet::End::Done,
                 };
                 pet_note(self.scr, pet::Ev::TurnEnd(end));
@@ -4272,6 +4336,10 @@ impl<'a> harness::Ui for TermUi<'a> {
     }
 
     fn pump(&mut self) -> Action {
+        if crate::fb::shutdown_requested().is_some() {
+            self.interrupted = true;
+            return Action::Cancel;
+        }
         if self.scr.artifact.is_some() {
             // Non-blocking drain so an open `/btw` or artifact panel never
             // stalls the background turn with 300ms blocking waits.
@@ -7391,7 +7459,7 @@ fn apps_menu(scr: &mut Scr, config_rc: &ConfigRc) -> AppsAction {
                         continue;
                     }
                     scr.menu = None;
-                    scr.draw();
+                    scr.yield_panel();
                     match crate::apps::run_on_screen_args(
                         &app,
                         crate::apps::DIRECT_TIMEOUT_S,
@@ -7547,12 +7615,14 @@ fn main() {
     // sequences: restore the terminal first, then report.
     std::panic::set_hook(Box::new(|info| {
         use std::io::Write as _;
+        crate::fb::restore_saved_panel();
         crate::stty_tty(&["sane", "min", "1", "time", "0"]);
         let mut o = std::io::stdout();
-        let _ = o.write_all(b"\x1b[0m\x1b[?25h\x1b[2J\x1b[H");
+        let _ = o.write_all(b"\x1b[0m\x1b[?25h");
         let _ = o.flush();
         eprintln!("dst: internal error: {info}");
     }));
+    crate::fb::install_shutdown_signals();
 
     // Host/device debug entry points for the real DSH login flow.
     let argv: Vec<String> = std::env::args().collect();
@@ -7573,6 +7643,9 @@ fn main() {
     }
     if argv.get(1).map(|s| s.as_str()) == Some("--pet-preview") {
         std::process::exit(pet_ui::preview(&argv));
+    }
+    if argv.get(1).map(|s| s.as_str()) == Some("--pet-demo") {
+        std::process::exit(pet_ui::demo(&argv));
     }
     if argv.iter().any(|a| a == "--dsh-login-test") {
         let port = 7788u16;
@@ -8128,6 +8201,7 @@ start another one in a different terminal or tmux window"
                 if let Some(name) = out.run_app.clone() {
                     match crate::apps::find(&name) {
                         Some(app) => {
+                            scr.yield_panel();
                             match crate::apps::run_on_screen(&app, crate::apps::DIRECT_TIMEOUT_S) {
                                 Ok(_) => scr.push(
                                     &i18n::tf("apps_exited", &[&app.label()]),
@@ -8471,6 +8545,11 @@ start another one in a different terminal or tmux window"
         pet.borrow_mut().conceal();
     }
     raw_mode(false);
+    if let Some(sig) = crate::fb::shutdown_requested() {
+        let _ = std::io::stdout().write_all(b"\x1b[0m\x1b[?25h");
+        let _ = std::io::stdout().flush();
+        std::process::exit(128 + sig);
+    }
     let _ = std::io::stdout().write_all(b"\x1b[0m\x1b[2J\x1b[H");
     println!("bye");
 }

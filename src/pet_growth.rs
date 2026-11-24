@@ -133,8 +133,62 @@ pub struct Usage {
     /// Upstream `usageStats.keywords`. Preserved across a round trip; this
     /// device does not detect keywords, so it does not increment the count.
     pub keywords: u32,
-    /// Numeric keys the desktop save had and this device does not own.
-    pub extra: Vec<(String, u32)>,
+    /// The `usageStats` object. Numbers keep a fractional part. Strings, bools,
+    /// null, arrays and nested objects stay as parsed. The integer fields above
+    /// are only the achievement view of the numeric keys.
+    pub values: Vec<(String, J)>,
+}
+
+const USAGE_MAX_KEYS: usize = 40;
+const USAGE_MAX_DEPTH: usize = 4;
+const USAGE_MAX_STR: usize = 512;
+const USAGE_MAX_ARR: usize = 32;
+
+impl Usage {
+    fn has(&self, key: &str) -> bool {
+        self.values.iter().any(|(k, _)| k == key)
+    }
+
+    /// Add one to a numeric counter. A key that is already a string or another
+    /// non-number is left alone. A missing key is created as a number.
+    pub fn add_count(&mut self, canonical: &str, legacy: &[&str]) {
+        let key = if self.has(canonical) {
+            canonical.to_string()
+        } else if let Some(found) = legacy.iter().copied().find(|k| self.has(k)) {
+            found.to_string()
+        } else {
+            canonical.to_string()
+        };
+        let mut found = false;
+        for (name, value) in &mut self.values {
+            if name == &key {
+                found = true;
+                if let J::Num(n) = value {
+                    if n.is_finite() {
+                        *n += 1.0;
+                    }
+                }
+                break;
+            }
+        }
+        if !found {
+            self.values.push((key, J::Num(1.0)));
+        }
+        self.refresh_counters();
+    }
+
+    fn refresh_counters(&mut self) {
+        let obj = J::Obj(self.values.clone());
+        self.tools = usage_num(&obj, &["tools"]);
+        self.code = usage_num(&obj, &["code"]);
+        self.success = usage_num(&obj, &["successes", "success"]);
+        self.failure = usage_num(&obj, &["failures", "failure"]);
+        self.messages = usage_num(&obj, &["messages"]);
+        self.keywords = usage_num(&obj, &["keywords"]);
+        self.pats = usage_num(&obj, &["pat", "pats"]);
+        self.feeds = usage_num(&obj, &["feeds"]);
+        self.triples = usage_num(&obj, &["triples"]);
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -206,12 +260,12 @@ impl Save {
     pub fn apply(&mut self, ev: GEvent, now_ms: i64) -> Vec<String> {
         let g = &mut self.growth;
         match ev {
-            GEvent::Pat => { g.mood += 4; g.affinity += 2; self.usage.pats += 1; }
-            GEvent::Feed => { g.satiety += 30.0; g.affinity += 5; g.mood += 3; self.usage.feeds += 1; }
+            GEvent::Pat => { g.mood += 4; g.affinity += 2; self.usage.add_count("pat", &["pats"]); }
+            GEvent::Feed => { g.satiety += 30.0; g.affinity += 5; g.mood += 3; self.usage.add_count("feeds", &[]); }
             GEvent::Praise => { g.mood += 5; g.affinity += 8; }
-            GEvent::Triple => { g.mood += 10; g.affinity += 10; self.usage.triples += 1; }
-            GEvent::Success => { g.mood += 3; self.usage.success += 1; }
-            GEvent::Failure => { g.mood -= 5; self.usage.failure += 1; }
+            GEvent::Triple => { g.mood += 10; g.affinity += 10; self.usage.add_count("triples", &[]); }
+            GEvent::Success => { g.mood += 3; self.usage.add_count("successes", &["success"]); }
+            GEvent::Failure => { g.mood -= 5; self.usage.add_count("failures", &["failure"]); }
             GEvent::Tick { mins } => { g.satiety -= mins * 0.15; }
             GEvent::Signin => {
                 let today = local_day(now_ms);
@@ -231,15 +285,15 @@ impl Save {
     }
 
     pub fn note_tool(&mut self, kind_is_code: bool, now_ms: i64) -> Vec<String> {
-        self.usage.tools += 1;
+        self.usage.add_count("tools", &[]);
         if kind_is_code {
-            self.usage.code += 1;
+            self.usage.add_count("code", &[]);
         }
         self.grant(now_ms)
     }
 
     pub fn note_message(&mut self, now_ms: i64) -> Vec<String> {
-        self.usage.messages += 1;
+        self.usage.add_count("messages", &[]);
         self.grant(now_ms)
     }
 
@@ -404,23 +458,25 @@ pub fn export_code(save: &Save, now_ms: i64, app_version: &str) -> String {
 /// Upstream `usageStats` names (`dsh-whale-moe.js` `loadUsageStats` /
 /// `addUsageStat("pat")`). Older dst files used `success` / `failure` / `pats`.
 fn usage_object(save: &Save) -> J {
-    let u = &save.usage;
-    let mut pairs = vec![
-        ("tools".to_string(), J::Num(u.tools as f64)),
-        ("code".to_string(), J::Num(u.code as f64)),
-        ("successes".to_string(), J::Num(u.success as f64)),
-        ("failures".to_string(), J::Num(u.failure as f64)),
-        ("messages".to_string(), J::Num(u.messages as f64)),
-        ("keywords".to_string(), J::Num(u.keywords as f64)),
-        ("pat".to_string(), J::Num(u.pats as f64)),
-        ("feeds".to_string(), J::Num(u.feeds as f64)),
-        ("triples".to_string(), J::Num(u.triples as f64)),
+    let mut pairs = save.usage.values.clone();
+    // Canonical keys are added only when neither the new nor the old name is
+    // present, so a string or a fractional number already stored is not replaced.
+    let specs: [(&str, &[&str], u32); 9] = [
+        ("tools", &[], save.usage.tools),
+        ("code", &[], save.usage.code),
+        ("successes", &["success"], save.usage.success),
+        ("failures", &["failure"], save.usage.failure),
+        ("messages", &[], save.usage.messages),
+        ("keywords", &[], save.usage.keywords),
+        ("pat", &["pats"], save.usage.pats),
+        ("feeds", &[], save.usage.feeds),
+        ("triples", &[], save.usage.triples),
     ];
-    for (k, v) in &u.extra {
-        if pairs.iter().any(|(name, _)| name == k) {
-            continue;
+    for (canon, legacy, n) in specs {
+        let present = pairs.iter().any(|(k, _)| k == canon || legacy.iter().any(|old| k == old));
+        if !present {
+            pairs.push((canon.to_string(), J::Num(n as f64)));
         }
-        pairs.push((k.clone(), J::Num(*v as f64)));
     }
     J::Obj(pairs)
 }
@@ -436,36 +492,78 @@ fn usage_num(obj: &J, keys: &[&str]) -> u32 {
     0
 }
 
-fn usage_from(obj: &J) -> Usage {
-    let mut usage = Usage {
-        tools: usage_num(obj, &["tools"]),
-        code: usage_num(obj, &["code"]),
-        success: usage_num(obj, &["successes", "success"]),
-        failure: usage_num(obj, &["failures", "failure"]),
-        messages: usage_num(obj, &["messages"]),
-        keywords: usage_num(obj, &["keywords"]),
-        pats: usage_num(obj, &["pat", "pats"]),
-        feeds: usage_num(obj, &["feeds"]),
-        triples: usage_num(obj, &["triples"]),
-        extra: Vec::new(),
+fn accept_usage(obj: &J) -> Result<Usage, String> {
+    let J::Obj(pairs) = obj else {
+        return Err("usageStats 不是对象".into());
     };
-    const OWNED: &[&str] = &[
-        "tools", "code", "successes", "success", "failures", "failure", "messages",
-        "keywords", "pat", "pats", "feeds", "triples",
-    ];
-    if let J::Obj(pairs) = obj {
-        for (key, value) in pairs {
-            if OWNED.iter().any(|name| name == key) {
-                continue;
-            }
-            if let Some(n) = value.as_num() {
-                if n >= 0.0 {
-                    usage.extra.push((key.clone(), n as u32));
-                }
-            }
-        }
+    match obj.get("tools") {
+        None => {}
+        Some(J::Num(n)) if n.is_finite() && *n >= 0.0 => {}
+        Some(J::Num(_)) => return Err("usageStats.tools 不是有限数字".into()),
+        // Upstream drops the whole object when `tools` is not a number.
+        Some(_) => return Ok(Usage::default()),
     }
-    usage
+    if pairs.len() > USAGE_MAX_KEYS {
+        return Err("usageStats 键太多".into());
+    }
+    let mut values = Vec::with_capacity(pairs.len());
+    for (key, value) in pairs {
+        if key.is_empty() || key.len() > 64 || key.chars().any(|c| c.is_control()) {
+            return Err("usageStats 键名不安全".into());
+        }
+        values.push((key.clone(), sanitize_usage_value(value, 1)?));
+    }
+    let mut usage = Usage { values, ..Usage::default() };
+    usage.refresh_counters();
+    Ok(usage)
+}
+
+fn sanitize_usage_value(value: &J, depth: usize) -> Result<J, String> {
+    if depth > USAGE_MAX_DEPTH {
+        return Err("usageStats 嵌套太深".into());
+    }
+    Ok(match value {
+        J::Null => J::Null,
+        J::Bool(b) => J::Bool(*b),
+        J::Num(n) => {
+            if !n.is_finite() {
+                return Err("usageStats 含有非有限数字".into());
+            }
+            J::Num(*n)
+        }
+        J::Str(s) => {
+            if s.len() > USAGE_MAX_STR {
+                return Err("usageStats 字符串过长".into());
+            }
+            if s.chars().any(|c| (c.is_control() && c != '\n' && c != '\t')) {
+                return Err("usageStats 字符串含有控制字符".into());
+            }
+            J::Str(s.clone())
+        }
+        J::Arr(items) => {
+            if items.len() > USAGE_MAX_ARR {
+                return Err("usageStats 数组过长".into());
+            }
+            let mut out = Vec::with_capacity(items.len());
+            for item in items {
+                out.push(sanitize_usage_value(item, depth + 1)?);
+            }
+            J::Arr(out)
+        }
+        J::Obj(pairs) => {
+            if pairs.len() > USAGE_MAX_KEYS {
+                return Err("usageStats 对象键太多".into());
+            }
+            let mut out = Vec::with_capacity(pairs.len());
+            for (key, value) in pairs {
+                if key.len() > 64 || key.chars().any(|c| c.is_control()) {
+                    return Err("usageStats 键名不安全".into());
+                }
+                out.push((key.clone(), sanitize_usage_value(value, depth + 1)?));
+            }
+            J::Obj(out)
+        }
+    })
 }
 
 fn data_object(save: &Save, core_only: bool) -> J {
@@ -605,7 +703,7 @@ fn sanitize(data: &J, now_ms: i64) -> Result<Save, String> {
                     _ => false,
                 };
                 if tools_ok && matches!(obj, J::Obj(_)) {
-                    save.usage = usage_from(&obj);
+                    save.usage = accept_usage(&obj)?;
                 }
             }
         }
@@ -933,13 +1031,19 @@ mod tests {
         assert_eq!(save.usage.failure, 4);
         assert_eq!(save.usage.pats, 7);
         assert_eq!(save.usage.keywords, 6);
-        assert_eq!(save.usage.extra, vec![("streak".to_string(), 8)]);
+        assert_eq!(
+            save.usage.values.iter().find(|(k, _)| k == "streak").and_then(|(_, v)| v.as_num()),
+            Some(8.0)
+        );
         let out = export_json(&save, now, "dst");
         let back = import_text(&out, now).unwrap();
         assert_eq!(back.usage.success, 3);
         assert_eq!(back.usage.keywords, 6);
         assert_eq!(back.usage.pats, 7);
-        assert_eq!(back.usage.extra, vec![("streak".to_string(), 8)]);
+        assert_eq!(
+            back.usage.values.iter().find(|(k, _)| k == "streak").and_then(|(_, v)| v.as_num()),
+            Some(8.0)
+        );
         let exported = crate::json::parse(&out).unwrap();
         let stats = exported.get("data").and_then(|d| d.get("usageStats")).and_then(|v| v.as_str()).unwrap();
         let stats = crate::json::parse(stats).unwrap();
@@ -959,6 +1063,34 @@ mod tests {
         assert_eq!(loaded.title, "Task-master");
         assert!(loaded.journal.contains("Task-master"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn usage_stats_keep_strings_fractions_and_unknown_shapes() {
+        let raw = r#"{"schema":"dsh-whale-musume/save","version":1,"exportedAt":"2025-11-20T00:53:20.000Z","appVersion":"ref","data":{"mood":"10","affinity":"0","satiety":"80","lastSignin":"","signinStreak":"0","achievements":"","companionSince":"","level":"1","usageStats":"{\"tools\":1,\"note\":\"keep-me\",\"ratio\":1.9,\"flag\":true,\"extra\":{\"k\":\"v\"}}","title":"A","selfName":""}}"#;
+        let now = 1_763_600_000_000;
+        let mut save = import_text(raw, now).unwrap();
+        assert_eq!(save.usage.values.iter().find(|(k, _)| k == "note").and_then(|(_, v)| v.as_str()), Some("keep-me"));
+        assert_eq!(save.usage.values.iter().find(|(k, _)| k == "ratio").and_then(|(_, v)| v.as_num()), Some(1.9));
+        assert!(matches!(
+            save.usage.values.iter().find(|(k, _)| k == "flag").map(|(_, v)| v),
+            Some(crate::json::J::Bool(true))
+        ));
+        save.usage.add_count("tools", &[]);
+        let out = export_json(&save, now, "dst");
+        assert!(out.contains("keep-me"), "{out}");
+        assert!(out.contains("1.9"), "{out}");
+        assert!(out.contains("true"), "{out}");
+        let back = import_text(&out, now).unwrap();
+        assert_eq!(back.usage.tools, 2);
+        assert_eq!(back.usage.values.iter().find(|(k, _)| k == "ratio").and_then(|(_, v)| v.as_num()), Some(1.9));
+        assert_eq!(back.usage.values.iter().find(|(k, _)| k == "note").and_then(|(_, v)| v.as_str()), Some("keep-me"));
+        let deep = r#"{"schema":"dsh-whale-musume/save","version":1,"exportedAt":"2025-11-20T00:53:20.000Z","appVersion":"ref","data":{"mood":"10","usageStats":"{\"a\":{\"b\":{\"c\":{\"d\":{\"e\":1}}}}}"}}"#;
+        assert!(import_text(deep, now).is_err());
+        let bad_tools = r#"{"schema":"dsh-whale-musume/save","version":1,"exportedAt":"2025-11-20T00:53:20.000Z","appVersion":"ref","data":{"mood":"10","usageStats":"{\"tools\":\"nope\",\"note\":\"gone\"}"}}"#;
+        let dropped = import_text(bad_tools, now).unwrap();
+        assert_eq!(dropped.usage.tools, 0);
+        assert!(dropped.usage.values.iter().all(|(k, _)| k != "note"));
     }
 
     #[test]

@@ -1,0 +1,14 @@
+{
+  "env": {
+    "DST_PET_FB_OUT": "/tmp/dst-pet-bounds.ppm",
+    "DST_NO_UPDATE_CHECK": "1",
+    "DST_PET_TRIAL": "1"
+  },
+  "steps": [
+    {"wait_for": {"text": "dst", "timeout_ms": 10000}},
+    {"send": "width"},
+    {"key": "Enter"},
+    {"wait_ms": 120, "snap": "live"},
+    {"wait_stable": {"stable_ms": 800, "timeout_ms": 20000}, "snap": "settled"}
+  ]
+}

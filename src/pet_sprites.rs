@@ -1,6 +1,6 @@
-// Original pixel whale-girl for the Cardputer Zero panel, drawn for this
-// program. These frames are not the portraits from dsh-whale-musume.
-// '.' is transparent. See pet_art::palette for the colours.
+// Simplified pixel frames kept so tests can tell them apart from a whale.
+// They are not drawn. A missing pack uses the character whale girl.
+#[allow(dead_code)]
 pub const IDLE: &[&str] = &[
     ".............dd.............",
     "............dhhd............",
@@ -36,6 +36,7 @@ pub const IDLE: &[&str] = &[
     ".......oooo......oooo.......",
 ];
 
+#[allow(dead_code)]
 pub const BLINK: &[&str] = &[
     ".............dd.............",
     "............dhhd............",
@@ -71,6 +72,7 @@ pub const BLINK: &[&str] = &[
     ".......oooo......oooo.......",
 ];
 
+#[allow(dead_code)]
 pub const THINK: &[&str] = &[
     ".............dd.............",
     "............dhhd............",
@@ -106,6 +108,7 @@ pub const THINK: &[&str] = &[
     ".......oooo......oooo.......",
 ];
 
+#[allow(dead_code)]
 pub const TALK: &[&str] = &[
     ".............dd.............",
     "............dhhd............",
@@ -141,6 +144,7 @@ pub const TALK: &[&str] = &[
     ".......oooo......oooo.......",
 ];
 
+#[allow(dead_code)]
 pub const HAPPY: &[&str] = &[
     ".............dd.............",
     "............dhhd............",
@@ -176,6 +180,7 @@ pub const HAPPY: &[&str] = &[
     ".......oooo......oooo.......",
 ];
 
+#[allow(dead_code)]
 pub const SAD: &[&str] = &[
     ".............dd.............",
     "............dhhd............",
@@ -211,6 +216,7 @@ pub const SAD: &[&str] = &[
     ".......oooo......oooo.......",
 ];
 
+#[allow(dead_code)]
 pub const EAT: &[&str] = &[
     ".............dd.............",
     "............dhhd............",
@@ -246,6 +252,7 @@ pub const EAT: &[&str] = &[
     ".......oooo......oooo.......",
 ];
 
+#[allow(dead_code)]
 pub const BLUSH: &[&str] = &[
     ".............dd.............",
     "............dhhd............",
@@ -281,6 +288,7 @@ pub const BLUSH: &[&str] = &[
     ".......oooo......oooo.......",
 ];
 
+#[allow(dead_code)]
 pub const SLEEP: &[&str] = &[
     "............dd......yy......",
     "............dhhd...y..y.....",
@@ -319,15 +327,16 @@ pub const SLEEP: &[&str] = &[
 pub fn prop_rows(name: &str) -> &'static [&'static str] {
     match name {
         "shell" => &["oggggggo", "oggggggo", "oggggggo", "oggggggo", "obbbbbbo", "oooooooo"],
-        "read" => &["..oooo..", ".o....o.", "o..kk..o", "o.k..k.o", ".o.kk.o.", "..oooo..", "...oo...", "...oo..."],
+        "read" => &["..wwww..", ".wyyyww.", "wyybyyww", "wyybyyww", ".wyyyww.", "..wwww..", "...bb...", "...bb..."],
         "web" => &[".oooooo.", "oowwwooo", "owoooowo", "woooowoo", "owoooowo", "oowwwooo", ".oooooo."],
         "write" => &["......yo", ".....yo.", "....yo..", "...yo...", "..yo....", ".so.....", "so......"],
         "look" => &["oooooooo", "okkookko", "oknnokno", "okkookko", "oooooooo"],
         "plan" => &["obbbbbbo", "owwwwwwo", "owkkkwoo", "owwwwwwo", "owkkkwoo", "obbbbbbo"],
-        "clock" => &["..oooo..", ".oowwoo.", "oowkwooo", "oowoooo.", ".oooooo.", "..oooo.."],
+        "clock" => &["..wwww..", ".wyyyww.", "wyybywww", "wyyyyww.", ".wwwwww.", "..wwww.."],
         "note" => &["..yyyy..", ".yyyyyy.", "yyyyyyyy", ".yyyyyy.", "..yyyy.."],
         "ask" => &[".oyyyyo.", "oyyyyoyo", ".....oyo", "....oyy.", "....yy..", "........", "....yy.."],
-        "gear" => &["o.oooo.o", ".ookko..", "ookkkkoo", "ookkkkoo", ".ookko..", "o.oooo.o"],
+        "gear" => &["y.wwww.y", ".ywwyy..", "ywwwwwwy", "ywwwwwwy", ".ywwyy..", "y.wwww.y"],
+        "artifact" => &["wwwwwwww", "wbbbbbbw", "wbwwwwbw", "wbwyywbw", "wbbbbbbw", "wwwwwwww"],
         _ => &[],
     }
 }

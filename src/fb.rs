@@ -11,8 +11,10 @@
 //! written by the pet, not a framebuffer.
 
 use std::fs::File;
-use std::io::{Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::Mutex;
 
 pub const WIDTH: usize = 320;
 pub const HEIGHT: usize = 170;
@@ -32,7 +34,20 @@ pub struct Info {
 pub struct Panel {
     file: File,
     pub info: Info,
+    /// Pixels that were on the panel before this process drew anything.
+    /// Restored on conceal, drop, and a caught signal. Never a black fill:
+    /// that would replace whatever fbterm had drawn.
+    backup: Vec<u8>,
 }
+
+struct SavedPanel {
+    path: PathBuf,
+    stride: usize,
+    bytes: Vec<u8>,
+}
+
+static SAVED_PANEL: Mutex<Option<SavedPanel>> = Mutex::new(None);
+static SHUTDOWN_SIGNAL: AtomicI32 = AtomicI32::new(0);
 
 /// `override_path` comes from `pet.fb` or `DST_FB`. Empty means probe.
 pub fn open(override_path: &str) -> Result<Panel, String> {
@@ -46,7 +61,22 @@ pub fn open(override_path: &str) -> Result<Panel, String> {
     for path in candidates {
         match inspect(&path, explicit) {
             Ok(info) => match File::options().read(true).write(true).open(&path) {
-                Ok(file) => return Ok(Panel { file, info }),
+                Ok(mut file) => match snapshot(&mut file, info.stride) {
+                    Ok(bytes) => {
+                        if let Ok(mut slot) = SAVED_PANEL.lock() {
+                            *slot = Some(SavedPanel {
+                                path: info.path.clone(),
+                                stride: info.stride,
+                                bytes: bytes.clone(),
+                            });
+                        }
+                        return Ok(Panel { file, info, backup: bytes });
+                    }
+                    Err(e) => why.push(format!(
+                        "{}: refusing to draw; could not read the current pixels ({e})",
+                        path.display()
+                    )),
+                },
                 Err(e) => why.push(format!("{}: {e}", path.display())),
             },
             Err(e) => why.push(e),
@@ -80,9 +110,10 @@ fn inspect(path: &Path, explicit: bool) -> Result<Info, String> {
     let (w, h) = virtual_size(&sys.join("virtual_size")).unwrap_or((0, 0));
     let stride = read_num(&sys.join("stride")).or_else(|| read_num(&sys.join("line_length"))).unwrap_or(0);
     let dev_name = std::fs::read_to_string(sys.join("name")).unwrap_or_default().trim().to_string();
-    // Measured on the Zero at 192.168.31.244 (user dylan, 2026-11-24):
-    // /dev/fb_lcd -> fb0, name like panel-mipi-dbi, 16bpp, virtual 320x170,
-    // stride 640. A taller virtual height is a double buffer and is refused.
+    // Measured panel: /dev/fb_lcd -> fb0, name like panel-mipi-dbi, 16bpp,
+    // virtual 320x170, stride 640. A taller virtual height is a double buffer
+    // and is refused. The login is passed in by the operator; it is not a
+    // default baked into this file.
     if !geometry_ok(bpp, w, h, stride) {
         return Err(format!(
             "{}: bpp {bpp} size {w}x{h} stride {stride} name {dev_name} (need 16bpp 320x170)",
@@ -176,8 +207,14 @@ impl Panel {
         Ok(())
     }
 
-    /// Paint every visible pixel. Used to hand the panel back to fbterm:
-    /// skipping magenta cannot erase a pixel this process already wrote.
+    /// Put back the pixels captured when the panel was opened.
+    pub fn restore(&mut self) -> Result<(), String> {
+        write_rows(&mut self.file, self.info.stride, &self.backup)
+    }
+
+    /// Paint every visible pixel. The live exit path restores the snapshot
+    /// instead, so a trial does not replace the previous screen with black.
+    #[allow(dead_code)]
     pub fn fill(&mut self, rgb: [u8; 3]) -> Result<(), String> {
         let value = rgb565(rgb);
         let px = [(value & 0xff) as u8, (value >> 8) as u8];
@@ -189,6 +226,101 @@ impl Panel {
         self.file.flush().ok();
         Ok(())
     }
+}
+
+impl Drop for Panel {
+    fn drop(&mut self) {
+        let _ = self.restore();
+    }
+}
+
+fn snapshot(file: &mut File, stride: usize) -> Result<Vec<u8>, String> {
+    let n = stride.checked_mul(HEIGHT).ok_or("framebuffer stride overflows")?;
+    // A 320x170 panel at stride 640 is 108800 bytes. Refuse anything larger
+    // than a 4K row so a wrong node cannot allocate a huge backup.
+    if n == 0 || n > 4096 * HEIGHT {
+        return Err(format!("framebuffer backup of {n} bytes is not the 320x170 panel"));
+    }
+    let mut bytes = vec![0u8; n];
+    file.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
+    file.read_exact(&mut bytes).map_err(|e| e.to_string())?;
+    Ok(bytes)
+}
+
+fn write_rows(file: &mut File, stride: usize, bytes: &[u8]) -> Result<(), String> {
+    if bytes.len() != stride * HEIGHT {
+        return Err("framebuffer backup does not match the panel".into());
+    }
+    for y in 0..HEIGHT {
+        let start = y * stride;
+        file.seek(SeekFrom::Start(start as u64)).map_err(|e| e.to_string())?;
+        file.write_all(&bytes[start..start + stride]).map_err(|e| e.to_string())?;
+    }
+    file.flush().ok();
+    Ok(())
+}
+
+/// Write the snapshot taken at open back to the device. Safe to call when
+/// no panel was opened. Used from the panic hook, which runs before `Drop`.
+pub fn restore_saved_panel() {
+    let saved = match SAVED_PANEL.lock() {
+        Ok(guard) => guard,
+        Err(_) => return,
+    };
+    let Some(saved) = saved.as_ref() else { return };
+    if let Ok(mut file) = File::options().write(true).open(&saved.path) {
+        let _ = write_rows(&mut file, saved.stride, &saved.bytes);
+    }
+}
+
+const SIGINT: i32 = 2;
+const SIGHUP: i32 = 1;
+const SIGTERM: i32 = 15;
+
+#[repr(C)]
+struct SigAction {
+    handler: usize,
+    mask: [u64; 16],
+    flags: i32,
+    restorer: usize,
+}
+
+unsafe extern "C" {
+    fn sigaction(sig: i32, act: *const SigAction, old: *mut SigAction) -> i32;
+    #[cfg(test)]
+    fn raise(sig: i32) -> i32;
+}
+
+extern "C" fn on_shutdown_signal(sig: i32) {
+    SHUTDOWN_SIGNAL.store(sig, Ordering::SeqCst);
+}
+
+/// Catch SIGTERM, SIGINT and SIGHUP so `timeout` can unwind through the
+/// normal exit path. The handler only stores the signal number. `SA_RESTART`
+/// is left off so a blocked read returns and the main loop can restore the
+/// terminal and the framebuffer.
+pub fn install_shutdown_signals() {
+    unsafe {
+        let act = SigAction {
+            handler: on_shutdown_signal as usize,
+            mask: [0; 16],
+            flags: 0,
+            restorer: 0,
+        };
+        for sig in [SIGINT, SIGHUP, SIGTERM] {
+            let _ = sigaction(sig, &act, std::ptr::null_mut());
+        }
+    }
+}
+
+pub fn shutdown_requested() -> Option<i32> {
+    let sig = SHUTDOWN_SIGNAL.load(Ordering::SeqCst);
+    if sig == 0 { None } else { Some(sig) }
+}
+
+#[cfg(test)]
+pub fn clear_shutdown_for_test() {
+    SHUTDOWN_SIGNAL.store(0, Ordering::SeqCst);
 }
 
 pub fn rgb565(px: [u8; 3]) -> u16 {
@@ -249,6 +381,57 @@ mod tests {
         assert!(name_is_panel("panel-mipi-dbi", "fb0"));
         assert!(name_is_panel("panel-mipi-dbid", "fb0"));
         assert!(!name_is_panel("HDMI-A-1", "fb1"));
+    }
+
+    #[test]
+    fn a_backup_round_trip_puts_the_original_pixels_back() {
+        let path = std::env::temp_dir().join(format!(
+            "dst-fb-backup-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let stride = WIDTH * 2;
+        let mut original = vec![0u8; stride * HEIGHT];
+        for (i, b) in original.iter_mut().enumerate() {
+            *b = (i % 251) as u8;
+        }
+        std::fs::write(&path, &original).unwrap();
+        let file = File::options().read(true).write(true).open(&path).unwrap();
+        let backup = {
+            let mut file = File::options().read(true).write(true).open(&path).unwrap();
+            snapshot(&mut file, stride).unwrap()
+        };
+        assert_eq!(backup, original);
+        let mut panel = Panel {
+            file,
+            info: Info {
+                path: path.clone(),
+                name: "test".into(),
+                stride,
+                explicit: true,
+            },
+            backup,
+        };
+        panel.fill([255, 0, 0]).unwrap();
+        panel.restore().unwrap();
+        drop(panel);
+        let after = std::fs::read(&path).unwrap();
+        assert_eq!(after, original);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn sigterm_is_caught_instead_of_killing_the_process() {
+        install_shutdown_signals();
+        clear_shutdown_for_test();
+        unsafe {
+            raise(SIGTERM);
+        }
+        assert_eq!(shutdown_requested(), Some(SIGTERM));
+        clear_shutdown_for_test();
     }
 
     #[test]

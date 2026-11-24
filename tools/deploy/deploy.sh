@@ -8,8 +8,9 @@
 #
 #   tools/deploy/deploy.sh [user@host] [remote-source-dir]
 #
-#   user@host           SSH target (default dylan@192.168.31.244)
-#                       hanxiao is the upstream author, not this device's login.
+#   user@host           SSH target. There is no default device.
+#                       Pass user@host or set DST_SSH_TARGET.
+#                       hanxiao is the upstream author, not a device login.
 #   remote-source-dir   IGNORED. Kept only for backwards compatibility: the old
 #                       script rsynced sources there and built on the device.
 #                       Cross-compiling no longer needs device-side sources.
@@ -24,6 +25,7 @@
 #   DST_SSH_KEY         SSH private key (if set with a password, both are used)
 #   DST_NO_RESTART=1    same as --no-restart
 #   DST_BUILD_ONLY=1    same as --build-only
+#   DST_SSH_TARGET      same as the user@host argument
 #   DST_CARGO_TARGET_DIR  staging dir (default /tmp/aarch64-zbuild)
 #   DST_ZIG_CC          linker wrapper (default /tmp/zigcc/zig-cc)
 #   DST_JOBS            cargo jobs (default 1; LTO + codegen-units=1 is serial)
@@ -45,7 +47,6 @@
 set -eu
 
 RUST_TARGET=aarch64-unknown-linux-gnu
-DEFAULT_TARGET=dylan@192.168.31.244
 HERE=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 
 usage() {
@@ -72,7 +73,7 @@ done
 case "$BUILD_ONLY" in 1|true|yes) BUILD_ONLY=1 ;; *) BUILD_ONLY=0 ;; esac
 case "$NO_RESTART" in 1|true|yes) NO_RESTART=1 ;; *) NO_RESTART=0 ;; esac
 
-TARGET=${1:-$DEFAULT_TARGET}
+TARGET=${1:-${DST_SSH_TARGET:-}}
 # Backwards compatibility: the old script's second positional argument was the
 # device-side source directory. Sources are no longer copied, so ignore it.
 REMOTE_SOURCE_DIR=${2:-}
@@ -197,6 +198,9 @@ if [ "$BUILD_ONLY" = 1 ]; then
 fi
 
 # ---- stage 4: device reachability + copy -----------------------------------
+if [ -z "$TARGET" ]; then
+    die "no SSH target. Pass user@host or set DST_SSH_TARGET. There is no default device. Use --build-only to compile without a target."
+fi
 SSH_OPTS="-o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 -o ServerAliveInterval=5 -o ServerAliveCountMax=3"
 SCP_OPTS="-o StrictHostKeyChecking=accept-new -o ConnectTimeout=10"
 KEY_ARGS=""

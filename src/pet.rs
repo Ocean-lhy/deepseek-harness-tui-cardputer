@@ -65,7 +65,7 @@ impl Pose {
                 Kind::Schedule => "clock",
                 Kind::Voice => "note",
                 Kind::Ask => "ask",
-                Kind::Screen => "",
+                Kind::Screen => "artifact",
                 Kind::Generic => "gear",
             },
             _ => "",
@@ -144,6 +144,8 @@ pub enum End {
     Done,
     Failed,
     Cancelled,
+    /// The configured step cap stopped the turn. Not a success and not a failure.
+    Limited,
 }
 
 #[derive(Clone, Debug)]
@@ -185,9 +187,6 @@ impl Machine {
                 if let Some(kind) = kind_of(&name) {
                     self.tools_open = self.tools_open.saturating_add(1);
                     self.kind = kind;
-                    if kind == Kind::Screen {
-                        self.tools_open = self.tools_open.saturating_sub(1);
-                    }
                 }
                 None
             }
@@ -230,7 +229,7 @@ impl Machine {
                         self.failure_until = now + FAIL_MS;
                         Some(GEvent::Failure)
                     }
-                    _ => None,
+                    End::Limited | End::Cancelled | End::Done | End::Failed => None,
                 }
             }
             Ev::Esc => {
@@ -294,7 +293,7 @@ impl Machine {
         if now < self.failure_until { return Pose::Failure; }
         if self.compacting { return Pose::Compact; }
         if now < self.interact_until { return self.interact; }
-        if self.tools_open > 0 && self.kind != Kind::Screen { return Pose::Tool; }
+        if self.tools_open > 0 { return Pose::Tool; }
         if self.thinking { return Pose::Think; }
         if self.talking { return Pose::Talk; }
         if now < self.success_until { return Pose::Success; }
@@ -369,20 +368,30 @@ impl Live {
     }
 
     /// Decide pixel vs text. `pixel_possible` is true when a probed panel or
-    /// the offscreen sink can take the picture. Never writes a device itself.
+    /// the offscreen sink can take the picture. Pixel mode also needs the
+    /// original pack. Without it the character whale girl is used, never the
+    /// simplified builtin sprite. Never writes a device itself.
     pub fn resolve(&mut self, pixel_possible: bool) {
         if !self.enabled {
             self.mode = Mode::Off;
             return;
         }
+        let pixel = pixel_possible && self.pack.is_some();
         self.mode = match self.render.as_str() {
             "text" => Mode::Text,
-            "pixel" if pixel_possible => Mode::Pixel,
-            "pixel" => Mode::Text,
-            _ if pixel_possible => Mode::Pixel,
+            _ if pixel => Mode::Pixel,
             _ => Mode::Text,
         };
         self.dirty = true;
+    }
+
+    pub fn has_pack(&self) -> bool {
+        self.pack.is_some()
+    }
+
+    #[cfg(test)]
+    pub fn set_pack_for_test(&mut self, pack: pet_art::Pack) {
+        self.pack = Some(pack);
     }
 
     pub fn enter_room(&mut self) {
@@ -562,6 +571,10 @@ mod tests {
         live.on_event(Ev::TurnEnd(End::Done), 4_100);
         assert_eq!(live.save.usage.success, 1);
         assert!(live.needs_save);
+        live.on_event(Ev::TurnStart, 5_000);
+        live.on_event(Ev::TurnEnd(End::Limited), 5_100);
+        assert_eq!(live.save.usage.success, 1, "a step cap is not a success");
+        assert_eq!(live.save.usage.failure, 2);
     }
 
     #[test]
@@ -598,6 +611,10 @@ mod tests {
         let mut live = Live::default();
         assert_eq!(live.wrap_cols(53), 53);
         live.configure(true, true, true, "pixel");
+        live.resolve(true);
+        assert!(!live.dock_showing(), "no pack means the character portrait, not a pixel dock");
+        assert_eq!(live.wrap_cols(53), 53);
+        live.set_pack_for_test(pet_art::Pack::from_idle_pixel());
         live.resolve(true);
         live.enter_chat();
         assert!(live.dock_showing());

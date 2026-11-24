@@ -631,10 +631,10 @@ cross-compiled on the host and pushed over SSH — nothing is built on the devic
 because a release build on the 446 MB box gets OOM-killed.
 
 ```sh
-tools/deploy/deploy.sh                     # default target: dylan@192.168.31.244
-tools/deploy/deploy.sh user@host           # another device
+tools/deploy/deploy.sh user@host           # SSH target; there is no default device
 tools/deploy/deploy.sh --build-only        # cross-compile + verify only; no SSH
-tools/deploy/deploy.sh --no-restart        # install, leave cpzterm running
+DST_SSH_TARGET=user@host tools/deploy/deploy.sh
+tools/deploy/deploy.sh --no-restart user@host
 ```
 
 Host prerequisites (the script detects missing pieces and prints the fix, it

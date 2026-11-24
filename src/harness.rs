@@ -167,6 +167,21 @@ pub enum TurnFate {
     Done,
     Failed,
     Cancelled,
+    /// `max_steps` stopped the turn. This is not a successful completion.
+    Limited,
+}
+
+/// Cancel wins over a failure, and a step cap wins over an ordinary stop.
+pub fn turn_fate(cancelled: bool, failed: bool, limit_hit: bool) -> TurnFate {
+    if cancelled {
+        TurnFate::Cancelled
+    } else if failed {
+        TurnFate::Failed
+    } else if limit_hit {
+        TurnFate::Limited
+    } else {
+        TurnFate::Done
+    }
 }
 
 /// Everything the driver needs from the front end.
@@ -950,13 +965,7 @@ pub fn run_turn(
     // session starts with the real transcript.
     crate::context::strip_time(msgs);
     report.steps = steps;
-    let fate = if report.cancelled {
-        TurnFate::Cancelled
-    } else if report.failed {
-        TurnFate::Failed
-    } else {
-        TurnFate::Done
-    };
+    let fate = turn_fate(report.cancelled, report.failed, report.limit_hit);
     ui.on(Ev::TurnEnd { steps, fate });
     report
 }
@@ -973,6 +982,14 @@ mod tests {
             width: 2,
             height: 2,
         }
+    }
+
+    #[test]
+    fn a_step_cap_is_not_a_successful_turn() {
+        assert_eq!(turn_fate(false, false, true), TurnFate::Limited);
+        assert_eq!(turn_fate(false, true, true), TurnFate::Failed);
+        assert_eq!(turn_fate(true, true, true), TurnFate::Cancelled);
+        assert_eq!(turn_fate(false, false, false), TurnFate::Done);
     }
 
     #[test]

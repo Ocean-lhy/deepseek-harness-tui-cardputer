@@ -277,3 +277,65 @@ stty sane
 - `app-run-pet-still-visible.png`（未通过）
 - `text-fallback.png`（字符鲸，未通过）
 - `tool-shell.png`、`tool-props.png`、`contact.png`
+
+# 实现后复核：本轮修复（Grok 4.7）
+
+这一节是 Grok 4.7 在 `2b9c952` 列出的剩余问题之后改完代码、再在云端复核的记录。它不是 Opus 独立验收。上面两节保持原样。云端没有连接设备，没有打开真实 framebuffer，没有安装，没有写 `/usr/local/bin`，没有改真实 `~/.dst`，没有合并。
+
+## 完成
+
+1. 保存的小程序占屏前先 `yield_panel`：离屏画面变成品红，真面板写回打开时读到的像素。应用菜单和占屏画面里没有鲸鱼娘；回到对话后侧栏重新出现。生产渲染：`/opt/cursor/artifacts/review-fix/app-running-pet-hidden.png`、`app-menu-pet-hidden.png`、`app-returned-pet-restored.png`。单测 `yielding_the_panel_hides_the_pet_until_the_next_frame`。场景 `pet_app_hide` 沿用 `creator_apps_run` 的文字断言并通过。
+2. 没有原始立绘包时不再画简化蓝发像素。像素模式要求资源包；否则是 9 行字符画（脸、两眼、身体、鲸尾），不是启动动画里的字符鲸。`text-whale-girl.png` 是这 9 行的渲染。`nopack-dock.png` 的侧栏只有状态条，没有发色 `(37,72,168)`。调试包仍是原来的 9 张立绘，tar SHA-256 仍是 `66ed9a093d520ecfb708085172b239d94601cf9e9ac63d2dc52588e63819e94e`，没有换成生成图。
+3. `usageStats` 按解析后的 JSON 值往返。字符串、小数、布尔和有限嵌套留下；成就用的整数是截断视图，导出不拿它覆盖小数。`tools` 不是数字时整份丢掉。键过多、嵌套过深、非有限数字或控制字符让导入失败。单测 `usage_stats_keep_strings_fractions_and_unknown_shapes`：`note` 为 `keep-me`，`ratio` 为 `1.9`，`tools` 从 1 加到 2 后小数还在。
+4. 步数上限是 `TurnFate::Limited` / `End::Limited`，不加成功也不加失败。场景 `step_limit` 的 `pet.json` 里 `successes` 为 0，画面仍有 “step limit reached (1)”。
+5. 侧栏打开时落定正文和流式行都按 43 列，流式行不再发 `\x1b[K` 清进侧栏。单测把 80 个 `Z` 收成 43 且不含清行。场景 `pet_bounds` 的落定正文最宽是 43。流式快照抓到的是中途一块（30 或 40 个 `Z`），没有出现 44 个连在一行；整行裁切的证据是单测，不是那张中途图。
+6. `read`、`clock`、`gear` 改成浅色，并加了 `artifact` 道具。图在 `review-fix/demo-tool-read.png`、`demo-tool-clock.png`、`demo-tool-gear.png`、`demo-tool-artifact.png`，来自 `dst --pet-demo` 和原立绘包，不是另画的通过图。
+7. `tools/pet/trial.sh` 使用空的临时 HOME，不复制配置、密钥、会话或存档，只临时打开宠物相关环境变量，关闭自更新，不调用模型。`version` 和 `render` 在本机退出 0。`--pet-demo` 只播本地姿态，打印 `pet-demo: local events, no network`。
+8. 打开面板时先读出 `stride×170` 字节。conceal、Drop、panic 和捕获到的 SIGTERM/SIGINT/SIGHUP 把这些字节写回去，不只 `stty sane`。信号退出不再额外清屏。单测对临时文件做了备份往返，并用 `raise(SIGTERM)` 确认进程不被杀掉。`deploy.sh` 不再带默认 `user@host`；`--build-only` 不需要目标。二进制里没有私有 IP。
+
+## 未完成
+
+- 没有在真实面板上画过。RGB565 字节序、stride 行距、闪烁、残字、二维码点阵，都还没在设备上看过。
+- 本机没有 qemu-aarch64，没有执行这份 aarch64 二进制。
+- `goal_manage`、`sandbox_full` 仍失败，和上一节的基线相同。`long_input` 通过。
+- `same_second_checkpoints_do_not_overwrite` 在整套里会因同一秒撞名失败一次，单独再跑通过。宠物改动没有碰检查点。
+- `node tools/sim/check_pet_migration.mjs` 因这台机器上没有上游 `whale-moe-core.js` 而跳过。`wm1_roundtrip_and_rejection` 单测通过。
+- 字符画是 9 行线稿。它不是字符鲸，也不是方头机器人；也还不是侧栏里那张蓝发立绘的清晰缩小版。
+- 流式场景快照没有抓到“已经写满 43 列”的那一帧，满行裁切靠单测。
+- SIGTERM 的清屏在单测里验证了处理函数和像素往返。没有对真实 `/dev/fb_lcd` 做 `timeout` 试画。
+
+## 测试
+
+- `cargo test --bin dst -- --test-threads=1 --skip jobs_run_wait_and_kill --skip watcher_lines_are_queued`：157 通过，1 失败（上面的同一秒检查点）。失败那条单独再跑通过。
+- 脱离会话的两条 `bg` 测试：2 通过。
+- 场景：`pet_bounds`、`step_limit`、`pet_app_hide`、`creator_apps_run`、`long_input` 通过。`goal_manage`、`sandbox_full` 失败，按基线记。
+- 本机 `trial.sh --stage version` 和 `--stage render` 退出 0。`--fb /dev/fb9 --stage fb` 退出 11（节点不存在）。非法 `--fb` 退出 2。
+
+## 制品
+
+aarch64 release（zig 0.17.1，`DST_ZIG=/tmp/zig/zig DST_JOBS=2 bash tools/deploy/deploy.sh --build-only`，没有 SSH）：
+
+- `/opt/cursor/artifacts/dst-linux-aarch64`
+- ELF 64-bit LSB pie，ARM aarch64，解释器 `/lib/ld-linux-aarch64.so.1`，stripped
+- 最高 glibc：`GLIBC_2.29` `posix_spawn_file_actions_addchdir_np`（设备是 2.41）
+- SHA-256 `27bab8af5b5046f2107e92023ea6b5f444c406a05dd39f2d521afe79ffcdd960`
+- 1773000 字节
+- 含 `pet-demo: local events, no network` 和上面的字符画。本机没有执行它。
+
+资源包未换：`/opt/cursor/artifacts/pet-pack-debug.tar.gz` SHA-256 `66ed9a093d520ecfb708085172b239d94601cf9e9ac63d2dc52588e63819e94e`。
+
+试验脚本：仓库 `tools/pet/trial.sh`，副本 `/opt/cursor/artifacts/trial.sh`，说明 `/opt/cursor/artifacts/TRIAL.txt`。
+
+新画面在 `/opt/cursor/artifacts/review-fix/`。旧的 `review-ca1b2b9/` 保留。
+
+## 设备上接着做的事
+
+把二进制、资源包目录和 `trial.sh` 拷到设备临时目录后，在设备上执行（不要写死账号或地址）：
+
+```sh
+sh trial.sh --bin ./dst --pack ./pet-pack --stage version
+sh trial.sh --bin ./dst --pack ./pet-pack --stage render
+sh trial.sh --bin ./dst --pack ./pet-pack --fb /dev/fb_lcd --stage fb
+```
+
+成功标准：前两步退出 0；`version` 打印 aarch64 release；`render` 在临时 HOME 里写出 `idle.ppm` 和 `text-idle.txt`。第三步退出 0，试画结束后面板像素与试画前的备份一致，真实 `~/.dst` 没有被改，没有安装，没有联网。若退出 10，先看日志里的其他显示进程，不要结束它们。退出 14 表示像素没有写回去。

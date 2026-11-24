@@ -142,8 +142,9 @@ impl Host {
     }
 
     /// Drop the portrait so a full-screen layer is not covered. The offscreen
-    /// sink becomes fully transparent. A real panel is painted black; the
-    /// terminal clear that follows redraws the cells fbterm owns.
+    /// sink becomes fully transparent. A real panel is put back to the pixels
+    /// captured when it was opened, so the previous screen is not replaced
+    /// with black.
     pub fn conceal(&mut self) {
         let pixels = crate::fb::WIDTH * crate::fb::HEIGHT;
         let mut blank = Vec::with_capacity(pixels * 3);
@@ -154,7 +155,7 @@ impl Host {
             let _ = crate::fb::write_ppm(path, &blank);
         }
         if let Some(panel) = self.panel.as_mut() {
-            let _ = panel.fill([0, 0, 0]);
+            let _ = panel.restore();
         }
     }
 
@@ -365,6 +366,9 @@ impl Host {
     fn mode_line(&self) -> String {
         let which = match self.live.mode {
             pet::Mode::Off => crate::i18n::t("pet_off"),
+            pet::Mode::Text if !self.live.has_pack() && self.live.render != "text" => {
+                crate::i18n::t("pet_no_pack")
+            }
             pet::Mode::Text => crate::i18n::t("pet_text"),
             pet::Mode::Pixel => crate::i18n::t("pet_pixel"),
         };
@@ -453,6 +457,7 @@ pub fn pixel_dock_for_test() -> Host {
         save_path: std::env::temp_dir().join("dst-pet-wrap-test.json"),
         last_save_error: String::new(),
     };
+    host.live.set_pack_for_test(crate::pet_art::Pack::from_idle_pixel());
     host.live.configure(true, true, true, "pixel");
     host.resolve();
     host.follow(false);
@@ -466,6 +471,111 @@ pub fn set_out_for_test(host: &mut Host, path: std::path::PathBuf) {
 
 fn now() -> u64 {
     pet_growth::now_ms().max(0) as u64
+}
+
+/// `dst --pet-demo <outdir> [--fb]`.
+/// Local poses only: no config, no API key, no network, no model call.
+/// Exit 0 ok, 2 bad args, 3 `--fb` needs `DST_PET_PACK`, 4 framebuffer open
+/// failed, 5 the original pixels could not be restored.
+pub fn demo(args: &[String]) -> i32 {
+    println!("pet-demo: local events, no network");
+    let mut out_dir: Option<&str> = None;
+    let mut use_fb = false;
+    for arg in args.iter().skip(2) {
+        if arg == "--fb" {
+            use_fb = true;
+        } else if out_dir.is_none() && !arg.starts_with('-') {
+            out_dir = Some(arg);
+        } else {
+            eprintln!("dst: usage: dst --pet-demo <outdir> [--fb]");
+            return 2;
+        }
+    }
+    let Some(out_dir) = out_dir else {
+        eprintln!("dst: usage: dst --pet-demo <outdir> [--fb]");
+        return 2;
+    };
+    let dir = PathBuf::from(out_dir);
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        eprintln!("dst: {e}");
+        return 2;
+    }
+    let pack = match std::env::var("DST_PET_PACK") {
+        Ok(path) if !path.trim().is_empty() => match crate::pet_art::load_pack(Path::new(path.trim())) {
+            Ok(pack) => pack,
+            Err(e) => {
+                eprintln!("dst: pet pack: {e}");
+                None
+            }
+        },
+        _ => None,
+    };
+    if use_fb && pack.is_none() {
+        eprintln!("dst: --fb needs DST_PET_PACK with the original portraits");
+        return 3;
+    }
+    let text = crate::pet_art::text_rows("idle").join("\n") + "\n";
+    if let Err(e) = std::fs::write(dir.join("text-idle.txt"), text) {
+        eprintln!("dst: {e}");
+        return 2;
+    }
+    let frames = [
+        ("idle", ""),
+        ("think", "plan"),
+        ("tool", "shell"),
+        ("tool-read", "read"),
+        ("tool-clock", "clock"),
+        ("tool-gear", "gear"),
+        ("tool-artifact", "artifact"),
+        ("talk", ""),
+        ("sad", ""),
+        ("blush", ""),
+    ];
+    let mut pictures: Vec<Vec<u8>> = Vec::new();
+    for (name, prop) in frames {
+        let pose = name.split('-').next().unwrap_or(name);
+        let paint = crate::pet_art::Paint::new(crate::pet_art::Scene::Dock, pose, prop);
+        let rgb = crate::pet_art::render(&paint, pack.as_ref());
+        if pack.is_some() {
+            let path = dir.join(format!("{name}.ppm"));
+            if let Err(e) = crate::fb::write_ppm(&path, &rgb) {
+                eprintln!("dst: {e}");
+                return 2;
+            }
+            println!("{}", path.display());
+        }
+        pictures.push(rgb);
+    }
+    println!("{}", dir.join("text-idle.txt").display());
+    if !use_fb {
+        return 0;
+    }
+    let node = std::env::var("DST_FB").unwrap_or_default();
+    let mut panel = match crate::fb::open(node.trim()) {
+        Ok(panel) => panel,
+        Err(e) => {
+            eprintln!("dst: {e}");
+            return 4;
+        }
+    };
+    let started = std::time::Instant::now();
+    for rgb in &pictures {
+        if started.elapsed().as_millis() >= 3_000 || crate::fb::shutdown_requested().is_some() {
+            break;
+        }
+        if let Err(e) = panel.blit_rgb(rgb) {
+            eprintln!("dst: {e}");
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    match panel.restore() {
+        Ok(()) => 0,
+        Err(e) => {
+            eprintln!("dst: restore: {e}");
+            5
+        }
+    }
 }
 
 /// `dst --pet-preview <dock|room> <pose> <out.ppm>` or `sheet <dir>`.
@@ -502,6 +612,9 @@ fn prop_for(pose: &str) -> &'static str {
         "web" => "web",
         "write" => "write",
         "think" | "plan" => "plan",
+        "clock" => "clock",
+        "gear" => "gear",
+        "artifact" => "artifact",
         _ => "",
     }
 }
@@ -539,6 +652,10 @@ mod tests {
         assert!(cfg.pet_enabled);
         assert!(lines.iter().any(|(t, _)| t.contains("whale") || !t.is_empty()));
         host.out_path = Some(std::env::temp_dir().join(format!("dst-pet-preview-{}.ppm", std::process::id())));
+        host.resolve();
+        assert_eq!(host.live.mode, pet::Mode::Text, "without a pack the character portrait is used");
+        assert_eq!(host.dock_width(53), 0);
+        host.live.set_pack_for_test(crate::pet_art::Pack::from_idle_pixel());
         host.resolve();
         assert_eq!(host.live.mode, pet::Mode::Pixel);
         host.follow(false);

@@ -545,22 +545,23 @@ DSH 事件来自 `harness::Ev`；存档格式兼容参考仓 schema v1 / `WM1`�
 
 - 默认 `pet.enabled: false`。`/pet on` 才出现宠物，并写回 `~/.dst/config.yml`。
 - 像素：探测到合格面板，或设置了 `DST_PET_FB_OUT`。探测顺序是显式路径（`DST_FB` 或 `pet.fb`，仍必须 16bpp、虚拟 320×170、stride 至少 640）→ `/dev/fb_lcd` → `/dev/fb_panel` → 名称像 st7789/mipi/panel 的节点。`panel-mipi-dbi` 和实测到的 `panel-mipi-dbid` 接受，HDMI 名称拒绝，虚拟高度大于 170 的双缓冲也拒绝。写之前还要求祖先进程里有 `fbterm`，或 `DST_PET_FB_FORCE=1`，或路径是用户显式指定的。对不上的设备不打开。
-- 侧栏占第 43–52 列、上面 10 行（60×140）。平时这些行不发清到行尾。正文宽度按面板的 53 列算，不按更窄的 pty：侧栏打开是 43 列。菜单、审批、提问、二维码、artifact 打开的第一帧先把离屏画面涂成品红、把真面板涂黑，再画全屏层；关掉之后的下一帧清一次行尾，然后才把宠物画回去。
+- 侧栏占第 43–52 列、上面 10 行（60×140）。平时这些行不发清到行尾。正文宽度按面板的 53 列算，不按更窄的 pty：侧栏打开时，落定正文和流式预览都是 43 列。菜单、审批、提问、二维码、artifact，以及保存的小程序占屏之前，先把离屏画面涂成品红，并把真面板恢复成打开时读到的像素，再把屏幕交给那一层；关掉之后的下一帧清一次行尾，然后才把宠物画回去。
+- 没有原始立绘包时不画内置简化像素女孩。像素模式需要资源包；否则是 9 行字符画（脸、身体、鲸尾），不是启动动画里的字符鲸，也不是方头机器人。
 - 空闲房间只替换还没被碰过的启动画面（正好 9 行艺术加 1 行）。`/pet` 或其他输出出现后，房间不再盖住那些行。进入对话后改为侧栏。
 - 姿态来自 `harness::Ev`：思考、流式回复、工具（`state_report` 不计）、失败、压缩、回合结束、Esc、空闲 10 秒睡觉。姿态至少保持 600 ms，更高优先级可以打断。
 - `/pet pat|feed|praise`，三次摸头在 3 秒内记为一次三连。数值和 45 个成就 ID 对齐参考仓；设备上会触发其中 29 个。小游戏、任务、周签、关键词、余额相关的 ID 只保留、不在设备上触发。
-- 存档 `~/.dst/pet.json`（`dst-pet/save`，mode 600）。养成计数、工具计数、消息数和跨过一分钟的饱食变化会落盘；只改姿态不写盘。写入失败会在画面上显示。导出是参考仓的 `dsh-whale-musume/save` v1 和 `WM1` 迁移码。`usageStats` 用上游键名 `successes` / `failures` / `messages` / `keywords` / `pat`，读入时也接受旧的 `success` / `failure` / `pats`。`keywords` 和其他不认识的数字键原样保留，设备不自己增加 `keywords`。回合失败记失败，取消两边都不记；工具错误已经记过的，回合结束不再加一次。导入先看文件是否超过 200000 字节，必须再输入 `confirm`，并先把当前文件复制为 `pet.json.bak`。文件是字段白名单，标题里的 “Task-master” 可以保存。不读写 API key、dsh token、聊天正文或工具参数。`WM1` 核心码不含 `usageStats`，锁定的样例字节不变。
+- 存档 `~/.dst/pet.json`（`dst-pet/save`，mode 600）。养成计数、工具计数、消息数和跨过一分钟的饱食变化会落盘；只改姿态不写盘。写入失败会在画面上显示。导出是参考仓的 `dsh-whale-musume/save` v1 和 `WM1` 迁移码。`usageStats` 保留可解析的字符串、小数、布尔、空值和有限嵌套；成就用的整数计数是这些数字的截断视图，导出仍写原来的小数。键太多、嵌套太深或含控制字符时整份导入失败，不悄悄截断。`tools` 不是数字时按上游丢掉整个对象。设备不自己增加 `keywords`。回合失败记失败，取消两边都不记，步数上限也不记成功；工具错误已经记过的，回合结束不再加一次。导入先看文件是否超过 200000 字节，必须再输入 `confirm`，并先把当前文件复制为 `pet.json.bak`。文件是字段白名单，标题里的 “Task-master” 可以保存。不读写 API key、dsh token、聊天正文或工具参数。`WM1` 核心码不含 `usageStats`，锁定的样例字节不变。
 - 资源包：`~/.dst/pet-pack/<pose>.ppm`，必须有 `idle.ppm`。品红 `#FF00FF` 透明。见 `docs/pet/PACK.md`。
 - 零新增 crate。
-- `dst --pet-preview sheet <目录>` 走同一套 `pet_art::render`。模拟器在 `DST_PET_FB_OUT` 指向的 PPM 上把品红当透明叠到文字画面上。
+- `dst --pet-preview sheet <目录>` 和 `dst --pet-demo <目录> [--fb]` 走同一套 `pet_art::render`。`--pet-demo` 只播本地姿态，不读配置、不访问网络。模拟器在 `DST_PET_FB_OUT` 指向的 PPM 上把品红当透明叠到文字画面上。SIGTERM、SIGINT、SIGHUP 和 panic 会把打开时备份的面板像素写回去，并 `stty sane`；信号退出不再额外清屏。
 
 ### 10.3 还没做
 
 小游戏、天气、余额、节日换装、530 条台词、TTS、关键词感知、把 92 张原图提交进公共 PR，都还没做。
 
-2026-11-24 用户在家用 Windows 上只读登录核实的面板（本代理没有连接该局域网，也没有在设备上画过）：主机名 Zero，用户 dylan，aarch64，Debian 13.7，glibc 2.41。`/proc/fb` 为 `0 panel-mipi-dbid`，`/dev/fb_lcd` 指向 `fb0`，没有 `fb_panel`。sysfs `virtual_size` 320,170，16bpp，stride 640，没有看到虚拟高度双缓冲。探测按这些几何条件接受或拒绝。`/usr/local/bin/dst` 当时不存在，`cpzterm.service` 是 inactive。这不是全盘搜索，不能据此说设备上没有别的 DSH。
+2026-11-24 在设备上只读核实过面板几何（本代理没有连接该局域网，也没有在设备上画过）：aarch64，Debian 13.7，glibc 2.41。`/proc/fb` 为 `0 panel-mipi-dbid`，`/dev/fb_lcd` 指向 `fb0`，没有 `fb_panel`。sysfs `virtual_size` 320,170，16bpp，stride 640，没有看到虚拟高度双缓冲。探测按这些几何条件接受或拒绝。当时没有找到标准路径上的 `dst` 和 `cpzterm`。这不是全盘搜索，不能据此说设备上没有别的显示程序。登录和地址由操作者传入，不写进部署脚本的默认值。
 
-临时试运行还没有执行。独立复验之后，由能进该局域网的机器做，不要在云端直连：把 aarch64 二进制和调试资源包拷到设备临时目录，不要装到 `/usr/local/bin`，不要启用服务，不要运行 `tools/deploy/deploy.sh`（它会安装并重启 cpzterm）。运行时加 `timeout`、`DST_NO_UPDATE_CHECK=1`、`DST_PET_TRIAL=1`，资源包用 `DST_PET_PACK`。需要画面板时只显式指定 `DST_FB=/dev/fb_lcd`。退出时会先把宠物从面板上清掉。
+设备试画由能进该局域网的机器执行 `tools/pet/trial.sh`。脚本使用空的临时 HOME，不复制真实配置、密钥、会话或存档，不安装，不写 `/usr/local/bin`。版本、生产渲染和短时 framebuffer 试画分开。试画前备份面板像素，退出时写回；若已有 fbterm、Xorg、weston、sway、wayfire、cage、另一个 dst，或有进程打开目标 framebuffer，脚本只报告并退出，不结束那些进程。
 
 ### 10.4 离屏画面
 
