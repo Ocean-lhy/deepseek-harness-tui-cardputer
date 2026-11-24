@@ -80,7 +80,10 @@ fn inspect(path: &Path, explicit: bool) -> Result<Info, String> {
     let (w, h) = virtual_size(&sys.join("virtual_size")).unwrap_or((0, 0));
     let stride = read_num(&sys.join("stride")).or_else(|| read_num(&sys.join("line_length"))).unwrap_or(0);
     let dev_name = std::fs::read_to_string(sys.join("name")).unwrap_or_default().trim().to_string();
-    if bpp != 16 || w != WIDTH || h != HEIGHT || stride < WIDTH * 2 {
+    // Measured on the Zero at 192.168.31.244 (user dylan, 2026-11-24):
+    // /dev/fb_lcd -> fb0, name like panel-mipi-dbi, 16bpp, virtual 320x170,
+    // stride 640. A taller virtual height is a double buffer and is refused.
+    if !geometry_ok(bpp, w, h, stride) {
         return Err(format!(
             "{}: bpp {bpp} size {w}x{h} stride {stride} name {dev_name} (need 16bpp 320x170)",
             path.display()
@@ -90,6 +93,10 @@ fn inspect(path: &Path, explicit: bool) -> Result<Info, String> {
         return Err(format!("{}: name {dev_name:?} is not the ST7789 panel", path.display()));
     }
     Ok(Info { path: path.to_path_buf(), name: dev_name, stride, explicit })
+}
+
+fn geometry_ok(bpp: usize, w: usize, h: usize, stride: usize) -> bool {
+    bpp == 16 && w == WIDTH && h == HEIGHT && stride >= WIDTH * 2
 }
 
 fn name_is_panel(dev_name: &str, node: &str) -> bool {
@@ -168,6 +175,20 @@ impl Panel {
         self.file.flush().ok();
         Ok(())
     }
+
+    /// Paint every visible pixel. Used to hand the panel back to fbterm:
+    /// skipping magenta cannot erase a pixel this process already wrote.
+    pub fn fill(&mut self, rgb: [u8; 3]) -> Result<(), String> {
+        let value = rgb565(rgb);
+        let px = [(value & 0xff) as u8, (value >> 8) as u8];
+        let row = px.repeat(WIDTH);
+        for y in 0..HEIGHT {
+            self.file.seek(SeekFrom::Start((y * self.info.stride) as u64)).map_err(|e| e.to_string())?;
+            self.file.write_all(&row).map_err(|e| e.to_string())?;
+        }
+        self.file.flush().ok();
+        Ok(())
+    }
 }
 
 pub fn rgb565(px: [u8; 3]) -> u16 {
@@ -225,5 +246,17 @@ mod tests {
         assert!(name_is_panel("st7789v", "fb1"));
         assert!(name_is_panel("drm", "fb_lcd"));
         assert!(name_is_panel("whatever", "fb_panel"));
+        assert!(name_is_panel("panel-mipi-dbi", "fb0"));
+        assert!(name_is_panel("panel-mipi-dbid", "fb0"));
+        assert!(!name_is_panel("HDMI-A-1", "fb1"));
+    }
+
+    #[test]
+    fn the_measured_panel_is_accepted_and_a_double_buffer_is_not() {
+        assert!(geometry_ok(16, 320, 170, 640));
+        assert!(!geometry_ok(16, 320, 340, 640), "virtual height above 170 is a second buffer");
+        assert!(!geometry_ok(32, 320, 170, 1280));
+        assert!(!geometry_ok(16, 1920, 1080, 3840));
+        assert!(!geometry_ok(16, 320, 170, 100));
     }
 }

@@ -139,6 +139,13 @@ impl Default for Machine {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum End {
+    Done,
+    Failed,
+    Cancelled,
+}
+
 #[derive(Clone, Debug)]
 pub enum Ev {
     TurnStart,
@@ -150,7 +157,9 @@ pub enum Ev {
     ToolResult { name: String, is_error: bool },
     Compact,
     CompactDone { ok: bool },
-    TurnEnd,
+    /// `Failed` is an API or harness failure that has not already been counted
+    /// as a tool error. `Cancelled` is Esc. Neither one is a success.
+    TurnEnd(End),
     Esc,
     Listen(bool),
     Pat,
@@ -201,28 +210,39 @@ impl Machine {
                 self.compacting = false;
                 if ok { None } else {
                     self.failure_until = now + FAIL_MS;
+                    self.turn_error = true;
                     Some(GEvent::Failure)
                 }
             }
-            Ev::TurnEnd => {
+            Ev::TurnEnd(end) => {
                 self.thinking = false;
                 self.talking = false;
                 self.tools_open = 0;
                 self.compacting = false;
-                if !self.turn_error {
-                    self.success_until = now + SUCCESS_MS;
-                    Some(GEvent::Success)
-                } else {
-                    self.turn_error = false;
-                    None
+                let already = self.turn_error;
+                self.turn_error = false;
+                match end {
+                    End::Done if !already => {
+                        self.success_until = now + SUCCESS_MS;
+                        Some(GEvent::Success)
+                    }
+                    End::Failed if !already => {
+                        self.failure_until = now + FAIL_MS;
+                        Some(GEvent::Failure)
+                    }
+                    _ => None,
                 }
             }
             Ev::Esc => {
+                let in_turn = self.thinking || self.talking || self.tools_open > 0 || self.compacting;
                 self.thinking = false;
                 self.talking = false;
                 self.tools_open = 0;
                 self.compacting = false;
                 self.startled_until = now + 900;
+                if in_turn {
+                    self.turn_error = true;
+                }
                 None
             }
             Ev::Listen(on) => { self.listening = on; None }
@@ -308,6 +328,8 @@ pub struct Live {
     room_live: bool,
     last_decay: u64,
     pub dirty: bool,
+    /// Counters changed and should be written. Pose-only events leave this false.
+    pub needs_save: bool,
 }
 
 impl Default for Live {
@@ -325,6 +347,7 @@ impl Default for Live {
             room_live: false,
             last_decay: 0,
             dirty: true,
+            needs_save: false,
         }
     }
 }
@@ -394,6 +417,7 @@ impl Live {
         }
         let was = self.machine.pose(now);
         let growth = self.machine.on(ev.clone(), now);
+        let mut persist = growth.is_some();
         let pose = self.machine.pose(now);
         if pose != was {
             self.dirty = true;
@@ -404,6 +428,7 @@ impl Live {
         }
         if let Ev::ToolCall(name) = &ev {
             if let Some(kind) = kind_of(name) {
+                persist = true;
                 unlocked.extend(self.save.note_tool(kind_is_code(kind), now as i64));
                 if pet_growth::night_hour(pet_growth::local_hour(now as i64)) && self.save.grant_id("night-work") {
                     unlocked.push("night-work".into());
@@ -411,6 +436,7 @@ impl Live {
             }
         }
         if matches!(ev, Ev::TalkDone) {
+            persist = true;
             unlocked.extend(self.save.note_message(now as i64));
         }
         if matches!(ev, Ev::Pat | Ev::Feed | Ev::Praise)
@@ -430,8 +456,12 @@ impl Live {
         if self.last_decay == 0 { self.last_decay = now; }
         let mins = now.saturating_sub(self.last_decay) as f64 / 60_000.0;
         if mins >= 1.0 {
+            persist = true;
             unlocked.extend(self.save.apply(GEvent::Tick { mins }, now as i64));
             self.last_decay = now;
+        }
+        if persist {
+            self.needs_save = true;
         }
         unlocked
     }
@@ -505,16 +535,39 @@ mod tests {
         m.on(Ev::ToolCall("bash".into()), 0);
         m.on(Ev::ToolResult { name: "bash".into(), is_error: true }, 100);
         assert_eq!(m.pose(100), Pose::Failure);
-        m.on(Ev::TurnEnd, 200);
+        m.on(Ev::TurnEnd(End::Done), 200);
         assert_eq!(m.pose(2000), Pose::Idle, "an errored turn does not celebrate");
-        m.on(Ev::TurnEnd, 3000);
+        m.on(Ev::TurnEnd(End::Done), 3000);
         assert_eq!(m.pose(3000), Pose::Success);
+    }
+
+    #[test]
+    fn api_failure_and_cancel_are_not_successes() {
+        let mut live = Live::default();
+        live.configure(true, true, true, "text");
+        live.resolve(false);
+        live.on_event(Ev::TurnEnd(End::Failed), 1_000);
+        assert_eq!(live.save.usage.failure, 1);
+        assert_eq!(live.save.usage.success, 0);
+        live.on_event(Ev::TurnStart, 2_000);
+        assert_eq!(live.on_event(Ev::TurnEnd(End::Cancelled), 2_100).len(), 0);
+        assert_eq!(live.save.usage.success, 0);
+        assert_eq!(live.save.usage.failure, 1);
+        live.on_event(Ev::ToolCall("bash".into()), 3_000);
+        live.on_event(Ev::ToolResult { name: "bash".into(), is_error: true }, 3_100);
+        live.on_event(Ev::TurnEnd(End::Failed), 3_200);
+        assert_eq!(live.save.usage.failure, 2, "the tool error is counted once");
+        assert_eq!(live.save.usage.success, 0);
+        live.on_event(Ev::TurnStart, 4_000);
+        live.on_event(Ev::TurnEnd(End::Done), 4_100);
+        assert_eq!(live.save.usage.success, 1);
+        assert!(live.needs_save);
     }
 
     #[test]
     fn idle_ten_seconds_sleeps_and_a_pat_wakes() {
         let mut m = Machine::default();
-        m.on(Ev::TurnEnd, 0);
+        m.on(Ev::TurnEnd(End::Done), 0);
         assert_eq!(m.pose(9_000), Pose::Idle);
         assert_eq!(m.pose(11_000), Pose::Sleep);
         assert_eq!(m.on(Ev::Pat, 12_000), Some(GEvent::Pat));

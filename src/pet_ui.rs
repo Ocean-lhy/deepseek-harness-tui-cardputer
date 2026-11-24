@@ -19,6 +19,8 @@ pub struct Host {
     fb_override: String,
     out_path: Option<PathBuf>,
     pack_dir: PathBuf,
+    save_path: PathBuf,
+    pub last_save_error: String,
 }
 
 pub enum IdleFace {
@@ -35,10 +37,12 @@ impl Host {
             tried: false,
             fb_override: std::env::var("DST_FB").unwrap_or_else(|_| cfg.pet_fb.clone()),
             out_path: std::env::var("DST_PET_FB_OUT").ok().map(PathBuf::from),
-            pack_dir: crate::config::home().join("pet-pack"),
+            pack_dir: pack_dir_from_env(),
+            save_path: pet_growth::save_path(),
+            last_save_error: String::new(),
         };
         host.apply_cfg(cfg);
-        host.live.save = pet_growth::load_file(&pet_growth::save_path());
+        host.live.save = pet_growth::load_file(&host.save_path);
         host.live.load_pack(&host.pack_dir);
         host.resolve();
         // last_activity starts at 0; without this the girl is born asleep
@@ -47,9 +51,16 @@ impl Host {
         if host.live.enabled {
             let now = now();
             let _ = host.live.sign_in(now);
-            let _ = pet_growth::store_file(&pet_growth::save_path(), &host.live.save);
+            host.persist_save();
         }
         host
+    }
+
+    fn persist_save(&mut self) {
+        match pet_growth::store_file(&self.save_path, &self.live.save) {
+            Ok(()) => self.last_save_error.clear(),
+            Err(e) => self.last_save_error = e,
+        }
     }
 
     pub fn apply_cfg(&mut self, cfg: &Config) {
@@ -123,10 +134,28 @@ impl Host {
             return Vec::new();
         }
         let unlocked = self.live.on_event(ev, now());
-        if !unlocked.is_empty() {
-            let _ = pet_growth::store_file(&pet_growth::save_path(), &self.live.save);
+        if self.live.needs_save {
+            self.live.needs_save = false;
+            self.persist_save();
         }
         unlocked
+    }
+
+    /// Drop the portrait so a full-screen layer is not covered. The offscreen
+    /// sink becomes fully transparent. A real panel is painted black; the
+    /// terminal clear that follows redraws the cells fbterm owns.
+    pub fn conceal(&mut self) {
+        let pixels = crate::fb::WIDTH * crate::fb::HEIGHT;
+        let mut blank = Vec::with_capacity(pixels * 3);
+        for _ in 0..pixels {
+            blank.extend_from_slice(&crate::pet_art::KEY);
+        }
+        if let Some(path) = &self.out_path {
+            let _ = crate::fb::write_ppm(path, &blank);
+        }
+        if let Some(panel) = self.panel.as_mut() {
+            let _ = panel.fill([0, 0, 0]);
+        }
     }
 
     pub fn present(&mut self) {
@@ -252,10 +281,15 @@ impl Host {
                 Err(e) => lines.push((crate::i18n::tf("pet_import_bad", &[&e]), err)),
             },
             "import" => {
-                if rest.trim().is_empty() {
+                let mut bits = rest.split_whitespace();
+                let path = bits.next().unwrap_or("");
+                let confirm = bits.next() == Some("confirm");
+                if path.is_empty() {
                     lines.push((crate::i18n::t("cmd_pet_usage").to_string(), err));
+                } else if !confirm {
+                    lines.push((crate::i18n::tf("pet_import_confirm", &[path]), err));
                 } else {
-                    match self.import_from(Path::new(rest.trim())) {
+                    match self.import_from(Path::new(path)) {
                         Ok(unlocked) => {
                             save_pet = true;
                             lines.push((crate::i18n::t("pet_imported").to_string(), norm));
@@ -300,7 +334,10 @@ impl Host {
             }
         }
         if persist && save_pet {
-            let _ = pet_growth::store_file(&pet_growth::save_path(), &self.live.save);
+            self.persist_save();
+            if !self.last_save_error.is_empty() {
+                lines.push((crate::i18n::tf("pet_save_bad", &[&self.last_save_error]), err));
+            }
         }
         lines
     }
@@ -372,14 +409,59 @@ impl Host {
     }
 
     fn import_from(&mut self, path: &Path) -> Result<Vec<String>, String> {
+        let meta = std::fs::metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        pet_growth::reject_oversized(meta.len())?;
         let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
         let mut save = pet_growth::import_text(&text, pet_growth::now_ms())?;
+        pet_growth::backup_save(&self.save_path)?;
         // Keep the device clock so a desktop export does not look like a
         // two-hour absence on the next tick.
         save.last_seen = pet_growth::now_ms();
         self.live.save = save;
         Ok(Vec::new())
     }
+}
+
+fn pack_dir_from_env() -> PathBuf {
+    std::env::var("DST_PET_PACK")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| crate::config::home().join("pet-pack"))
+}
+
+fn load_preview_pack() -> Option<crate::pet_art::Pack> {
+    let dir = pack_dir_from_env();
+    match crate::pet_art::load_pack(&dir) {
+        Ok(pack) => pack,
+        Err(e) => {
+            eprintln!("dst: pet pack: {e}");
+            None
+        }
+    }
+}
+
+#[cfg(test)]
+pub fn pixel_dock_for_test() -> Host {
+    let mut host = Host {
+        live: pet::Live::default(),
+        panel: None,
+        tried: true,
+        fb_override: String::new(),
+        out_path: Some(std::env::temp_dir().join("dst-pet-wrap-test.ppm")),
+        pack_dir: std::env::temp_dir(),
+        save_path: std::env::temp_dir().join("dst-pet-wrap-test.json"),
+        last_save_error: String::new(),
+    };
+    host.live.configure(true, true, true, "pixel");
+    host.resolve();
+    host.follow(false);
+    host
+}
+
+#[cfg(test)]
+pub fn set_out_for_test(host: &mut Host, path: std::path::PathBuf) {
+    host.out_path = Some(path);
 }
 
 fn now() -> u64 {
@@ -403,7 +485,8 @@ pub fn preview(args: &[String]) -> i32 {
     let out = args.get(4).cloned().unwrap_or_else(|| format!("pet-{kind}-{pose}.ppm"));
     let scene = if kind == "room" { crate::pet_art::Scene::Room } else { crate::pet_art::Scene::Dock };
     let paint = crate::pet_art::Paint::new(scene, pose, prop_for(pose));
-    let rgb = crate::pet_art::render(&paint, None);
+    let pack = load_preview_pack();
+    let rgb = crate::pet_art::render(&paint, pack.as_ref());
     if let Err(e) = crate::fb::write_ppm(Path::new(&out), &rgb) {
         eprintln!("dst: {e}");
         return 1;
@@ -425,14 +508,15 @@ fn prop_for(pose: &str) -> &'static str {
 
 fn write_sheet(dir: &Path) -> Result<(), String> {
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    let pack = load_preview_pack();
     for pose in ["idle", "blink", "think", "talk", "happy", "sad", "eat", "blush", "sleep", "tool"] {
         let paint = crate::pet_art::Paint::new(crate::pet_art::Scene::Dock, pose, prop_for(pose));
-        let rgb = crate::pet_art::render(&paint, None);
+        let rgb = crate::pet_art::render(&paint, pack.as_ref());
         crate::fb::write_ppm(&dir.join(format!("dock-{pose}.ppm")), &rgb)?;
     }
     for pose in ["idle", "sleep", "happy"] {
         let paint = crate::pet_art::Paint::new(crate::pet_art::Scene::Room, pose, "");
-        let rgb = crate::pet_art::render(&paint, None);
+        let rgb = crate::pet_art::render(&paint, pack.as_ref());
         crate::fb::write_ppm(&dir.join(format!("room-{pose}.ppm")), &rgb)?;
     }
     let text_path = dir.join("text-idle.txt");
@@ -465,5 +549,69 @@ mod tests {
         if let Some(p) = &host.out_path {
             let _ = std::fs::remove_file(p);
         }
+    }
+
+    #[test]
+    fn import_waits_for_confirm_then_backs_the_old_save_up() {
+        let dir = std::env::temp_dir().join(format!("dst-pet-import-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let mut cfg = Config::default();
+        let mut host = Host {
+            live: pet::Live::default(),
+            panel: None,
+            tried: true,
+            fb_override: String::new(),
+            out_path: None,
+            pack_dir: dir.join("pack"),
+            save_path: dir.join("pet.json"),
+            last_save_error: String::new(),
+        };
+        host.live.configure(true, false, false, "text");
+        host.live.save.title = "old".into();
+        pet_growth::store_file(&host.save_path, &host.live.save).unwrap();
+        let mut incoming = pet_growth::Save::default();
+        incoming.title = "Task-master".into();
+        let src = dir.join("in.json");
+        std::fs::write(&src, pet_growth::export_json(&incoming, 1_763_600_000_000, "ref")).unwrap();
+        let preview = host.command(&format!("import {}", src.display()), &mut cfg, false);
+        assert!(preview.iter().any(|(t, _)| t.contains("confirm")), "{preview:?}");
+        assert_eq!(host.live.save.title, "old");
+        let applied = host.command(&format!("import {} confirm", src.display()), &mut cfg, true);
+        assert!(applied.iter().any(|(t, _)| !t.is_empty()));
+        assert_eq!(host.live.save.title, "Task-master");
+        assert_eq!(std::fs::read_to_string(dir.join("pet.json.bak")).unwrap().contains("old"), true);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_pat_is_still_there_after_reload_and_a_write_error_is_shown() {
+        let dir = std::env::temp_dir().join(format!("dst-pet-save-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut cfg = Config::default();
+        let mut host = Host {
+            live: pet::Live::default(),
+            panel: None,
+            tried: true,
+            fb_override: String::new(),
+            out_path: None,
+            pack_dir: dir.join("pack"),
+            save_path: dir.join("pet.json"),
+            last_save_error: String::new(),
+        };
+        host.live.configure(true, false, false, "text");
+        let lines = host.command("pat", &mut cfg, true);
+        assert!(lines.iter().any(|(t, _)| !t.is_empty()));
+        let loaded = pet_growth::load_file(&host.save_path);
+        assert_eq!(loaded.usage.pats, 1, "the pat counter has to survive a reload");
+        let blocker = dir.join("blocked");
+        std::fs::write(&blocker, "x").unwrap();
+        host.save_path = blocker.join("pet.json");
+        let failed = host.command("pat", &mut cfg, true);
+        assert!(
+            failed.iter().any(|(t, _)| t.contains("could not save") || t.contains("保存")),
+            "a failed save must be visible, got {failed:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

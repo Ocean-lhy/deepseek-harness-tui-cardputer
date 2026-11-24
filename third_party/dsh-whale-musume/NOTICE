@@ -1,0 +1,15 @@
+dst copies growth rules and achievement names from
+Sutera-Diffusus/dsh-whale-musume. dst is unofficial and is not affiliated
+with that project or with its author.
+
+Source: https://github.com/Sutera-Diffusus/dsh-whale-musume
+Revision used for the license text and the portrait filenames:
+2d35234a7a01b18bdb3ad6c32e646b3d10e87828
+License: MIT, Copyright (c) 2026 Sutera-Diffusus. The text is LICENSE in
+this directory, copied from that revision.
+
+The 92 portraits are not in this git repository. A local debug pack may be
+built from those files under the same MIT notice. That pack is a temporary
+debug artifact, not an official asset and not a public release. The terms of
+the generators named in docs/pet/ASSET-LICENSE.md, at the time the portraits
+were generated, were not found.

@@ -631,7 +631,7 @@ cross-compiled on the host and pushed over SSH — nothing is built on the devic
 because a release build on the 446 MB box gets OOM-killed.
 
 ```sh
-tools/deploy/deploy.sh                     # default target: hanxiao@192.168.43.49
+tools/deploy/deploy.sh                     # default target: dylan@192.168.31.244
 tools/deploy/deploy.sh user@host           # another device
 tools/deploy/deploy.sh --build-only        # cross-compile + verify only; no SSH
 tools/deploy/deploy.sh --no-restart        # install, leave cpzterm running

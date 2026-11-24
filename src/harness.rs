@@ -158,7 +158,15 @@ pub enum Ev {
     /// Actionable recovery hint shown highlighted below an error.
     Hint(String),
     StepEnd(u32),
-    TurnEnd { steps: u32 },
+    TurnEnd { steps: u32, fate: TurnFate },
+}
+
+/// How the turn stopped. A failure or a cancel is not a successful turn.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TurnFate {
+    Done,
+    Failed,
+    Cancelled,
 }
 
 /// Everything the driver needs from the front end.
@@ -942,7 +950,14 @@ pub fn run_turn(
     // session starts with the real transcript.
     crate::context::strip_time(msgs);
     report.steps = steps;
-    ui.on(Ev::TurnEnd { steps });
+    let fate = if report.cancelled {
+        TurnFate::Cancelled
+    } else if report.failed {
+        TurnFate::Failed
+    } else {
+        TurnFate::Done
+    };
+    ui.on(Ev::TurnEnd { steps, fate });
     report
 }
 

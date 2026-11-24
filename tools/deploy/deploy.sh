@@ -8,7 +8,8 @@
 #
 #   tools/deploy/deploy.sh [user@host] [remote-source-dir]
 #
-#   user@host           SSH target (default hanxiao@192.168.43.49)
+#   user@host           SSH target (default dylan@192.168.31.244)
+#                       hanxiao is the upstream author, not this device's login.
 #   remote-source-dir   IGNORED. Kept only for backwards compatibility: the old
 #                       script rsynced sources there and built on the device.
 #                       Cross-compiling no longer needs device-side sources.
@@ -44,7 +45,7 @@
 set -eu
 
 RUST_TARGET=aarch64-unknown-linux-gnu
-DEFAULT_TARGET=hanxiao@192.168.43.49
+DEFAULT_TARGET=dylan@192.168.31.244
 HERE=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 
 usage() {

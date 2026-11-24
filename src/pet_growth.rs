@@ -1,10 +1,12 @@
 //! Growth, the 45 achievement ids, and the `dsh-whale-musume` save format.
 //!
-//! The numeric rules and the `WM1-` / JSON schema follow
-//! `assets/whale-moe-core.js` in Sutera-Diffusus/dsh-whale-musume (MIT) so a
-//! save can move in either direction. Only the rules are reimplemented; no
-//! file from that repository is copied. Device-only fields (`last_seen`) are
-//! never written into an export.
+//! The numeric rules, achievement names and the `WM1-` / JSON schema follow
+//! `assets/whale-moe-core.js` in Sutera-Diffusus/dsh-whale-musume
+//! (MIT, Copyright (c) 2026 Sutera-Diffusus). This program is unofficial and
+//! is not affiliated with that project. The license text is
+//! `third_party/dsh-whale-musume/LICENSE`. Device-only fields (`last_seen`)
+//! are never written into an export. The on-disk file is a whitelist of pet
+//! fields: it does not store API keys, chat text or tool arguments.
 
 use crate::json::J;
 
@@ -128,6 +130,11 @@ pub struct Usage {
     pub pats: u32,
     pub feeds: u32,
     pub triples: u32,
+    /// Upstream `usageStats.keywords`. Preserved across a round trip; this
+    /// device does not detect keywords, so it does not increment the count.
+    pub keywords: u32,
+    /// Numeric keys the desktop save had and this device does not own.
+    pub extra: Vec<(String, u32)>,
 }
 
 #[derive(Clone, Debug)]
@@ -394,6 +401,73 @@ pub fn export_code(save: &Save, now_ms: i64, app_version: &str) -> String {
     format!("WM1-{sum}-{b64}")
 }
 
+/// Upstream `usageStats` names (`dsh-whale-moe.js` `loadUsageStats` /
+/// `addUsageStat("pat")`). Older dst files used `success` / `failure` / `pats`.
+fn usage_object(save: &Save) -> J {
+    let u = &save.usage;
+    let mut pairs = vec![
+        ("tools".to_string(), J::Num(u.tools as f64)),
+        ("code".to_string(), J::Num(u.code as f64)),
+        ("successes".to_string(), J::Num(u.success as f64)),
+        ("failures".to_string(), J::Num(u.failure as f64)),
+        ("messages".to_string(), J::Num(u.messages as f64)),
+        ("keywords".to_string(), J::Num(u.keywords as f64)),
+        ("pat".to_string(), J::Num(u.pats as f64)),
+        ("feeds".to_string(), J::Num(u.feeds as f64)),
+        ("triples".to_string(), J::Num(u.triples as f64)),
+    ];
+    for (k, v) in &u.extra {
+        if pairs.iter().any(|(name, _)| name == k) {
+            continue;
+        }
+        pairs.push((k.clone(), J::Num(*v as f64)));
+    }
+    J::Obj(pairs)
+}
+
+fn usage_num(obj: &J, keys: &[&str]) -> u32 {
+    for key in keys {
+        if let Some(n) = obj.get(key).and_then(|v| v.as_num()) {
+            if n >= 0.0 {
+                return n as u32;
+            }
+        }
+    }
+    0
+}
+
+fn usage_from(obj: &J) -> Usage {
+    let mut usage = Usage {
+        tools: usage_num(obj, &["tools"]),
+        code: usage_num(obj, &["code"]),
+        success: usage_num(obj, &["successes", "success"]),
+        failure: usage_num(obj, &["failures", "failure"]),
+        messages: usage_num(obj, &["messages"]),
+        keywords: usage_num(obj, &["keywords"]),
+        pats: usage_num(obj, &["pat", "pats"]),
+        feeds: usage_num(obj, &["feeds"]),
+        triples: usage_num(obj, &["triples"]),
+        extra: Vec::new(),
+    };
+    const OWNED: &[&str] = &[
+        "tools", "code", "successes", "success", "failures", "failure", "messages",
+        "keywords", "pat", "pats", "feeds", "triples",
+    ];
+    if let J::Obj(pairs) = obj {
+        for (key, value) in pairs {
+            if OWNED.iter().any(|name| name == key) {
+                continue;
+            }
+            if let Some(n) = value.as_num() {
+                if n >= 0.0 {
+                    usage.extra.push((key.clone(), n as u32));
+                }
+            }
+        }
+    }
+    usage
+}
+
 fn data_object(save: &Save, core_only: bool) -> J {
     let g = &save.growth;
     let mut pairs = vec![
@@ -414,17 +488,7 @@ fn data_object(save: &Save, core_only: bool) -> J {
         if !save.week.is_empty() { pairs.push(("weekSignin", J::s(&save.week))); }
         pairs.push(("badge", J::s(&clip(&save.badge, 40))));
         if !save.game.is_empty() { pairs.push(("gameStats", J::s(&save.game))); }
-        let usage = J::o(vec![
-            ("tools", J::Num(save.usage.tools as f64)),
-            ("code", J::Num(save.usage.code as f64)),
-            ("success", J::Num(save.usage.success as f64)),
-            ("failure", J::Num(save.usage.failure as f64)),
-            ("messages", J::Num(save.usage.messages as f64)),
-            ("pats", J::Num(save.usage.pats as f64)),
-            ("feeds", J::Num(save.usage.feeds as f64)),
-            ("triples", J::Num(save.usage.triples as f64)),
-        ]).dump();
-        pairs.push(("usageStats", J::s(&usage)));
+        pairs.push(("usageStats", J::s(&usage_object(save).dump())));
         if !save.journal.is_empty() { pairs.push(("journal", J::s(&save.journal))); }
     }
     pairs.push(("title", J::s(&clip(&save.title, 20))));
@@ -541,15 +605,7 @@ fn sanitize(data: &J, now_ms: i64) -> Result<Save, String> {
                     _ => false,
                 };
                 if tools_ok && matches!(obj, J::Obj(_)) {
-                    let n = |k: &str| obj.get(k).and_then(|v| v.as_num()).unwrap_or(0.0).max(0.0) as u32;
-                    save.usage.tools = n("tools");
-                    save.usage.code = n("code");
-                    save.usage.success = n("success");
-                    save.usage.failure = n("failure");
-                    save.usage.messages = n("messages");
-                    save.usage.pats = n("pats");
-                    save.usage.feeds = n("feeds");
-                    save.usage.triples = n("triples");
+                    save.usage = usage_from(&obj);
                 }
             }
         }
@@ -680,12 +736,9 @@ pub fn store_file(path: &std::path::Path, save: &Save) -> Result<(), String> {
         ("lastSeen", J::Num(save.last_seen as f64)),
         ("data", data_object(save, false)),
     ]).dump();
-    // Refuse to persist anything that looks like a credential. The save struct
-    // has no key field; this is a backstop against a future field leaking one.
-    let low = body.to_ascii_lowercase();
-    if low.contains("api_key") || low.contains("dsh_token") || low.contains("authorization") || low.contains("sk-") {
-        return Err("pet save refused: credential-like text".into());
-    }
+    // The file is an explicit field whitelist. User text such as a title
+    // "Task-master" is allowed; a new top-level field is not.
+    save_whitelist(&body)?;
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, body).map_err(|e| e.to_string())?;
     std::fs::rename(&tmp, path).map_err(|e| e.to_string())?;
@@ -695,6 +748,69 @@ pub fn store_file(path: &std::path::Path, save: &Save) -> Result<(), String> {
         let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
     }
     Ok(())
+}
+
+fn save_whitelist(body: &str) -> Result<(), String> {
+    let root = crate::json::parse(body).ok_or("pet save is not json")?;
+    let J::Obj(root_kv) = &root else {
+        return Err("pet save is not an object".into());
+    };
+    for (key, _) in root_kv {
+        if !matches!(key.as_str(), "schema" | "version" | "lastSeen" | "data") {
+            return Err(format!("pet save refused: unexpected field {key}"));
+        }
+    }
+    let Some(J::Obj(data_kv)) = root.get("data") else {
+        return Err("pet save refused: missing data".into());
+    };
+    for (key, _) in data_kv {
+        if !matches!(
+            key.as_str(),
+            "mood"
+                | "affinity"
+                | "satiety"
+                | "lastSignin"
+                | "signinStreak"
+                | "achievements"
+                | "companionSince"
+                | "level"
+                | "quests"
+                | "weekSignin"
+                | "badge"
+                | "gameStats"
+                | "usageStats"
+                | "journal"
+                | "title"
+                | "selfName"
+        ) {
+            return Err(format!("pet save refused: unexpected field {key}"));
+        }
+    }
+    Ok(())
+}
+
+/// Reject an import before the whole file is read into memory.
+pub fn reject_oversized(len: u64) -> Result<(), String> {
+    if len > MAX_TEXT as u64 {
+        Err("内容太大，不像是存档".into())
+    } else {
+        Ok(())
+    }
+}
+
+/// Copy the current save aside. Missing files are not an error.
+pub fn backup_save(path: &std::path::Path) -> Result<Option<std::path::PathBuf>, String> {
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let bak = path.with_file_name("pet.json.bak");
+    std::fs::copy(path, &bak).map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&bak, std::fs::Permissions::from_mode(0o600));
+    }
+    Ok(Some(bak))
 }
 
 pub fn now_ms() -> i64 {
@@ -805,6 +921,57 @@ mod tests {
         for needle in ["api_key", "dsh_token", "authorization", "sk-", "bearer"] {
             assert!(!low.contains(needle), "{needle} in {json}");
         }
+    }
+
+    #[test]
+    fn upstream_usage_stats_round_trip_and_a_title_can_say_task_master() {
+        let raw = r#"{"schema":"dsh-whale-musume/save","version":1,"exportedAt":"2025-11-20T00:53:20.000Z","appVersion":"ref","data":{"mood":"10","affinity":"0","satiety":"80","lastSignin":"","signinStreak":"0","achievements":"","companionSince":"","level":"1","usageStats":"{\"tools\":2,\"code\":1,\"successes\":3,\"failures\":4,\"messages\":5,\"keywords\":6,\"pat\":7,\"streak\":8}","title":"Task-master","selfName":""}}"#;
+        let now = 1_763_600_000_000;
+        let save = import_text(raw, now).unwrap();
+        assert_eq!(save.title, "Task-master");
+        assert_eq!(save.usage.success, 3);
+        assert_eq!(save.usage.failure, 4);
+        assert_eq!(save.usage.pats, 7);
+        assert_eq!(save.usage.keywords, 6);
+        assert_eq!(save.usage.extra, vec![("streak".to_string(), 8)]);
+        let out = export_json(&save, now, "dst");
+        let back = import_text(&out, now).unwrap();
+        assert_eq!(back.usage.success, 3);
+        assert_eq!(back.usage.keywords, 6);
+        assert_eq!(back.usage.pats, 7);
+        assert_eq!(back.usage.extra, vec![("streak".to_string(), 8)]);
+        let exported = crate::json::parse(&out).unwrap();
+        let stats = exported.get("data").and_then(|d| d.get("usageStats")).and_then(|v| v.as_str()).unwrap();
+        let stats = crate::json::parse(stats).unwrap();
+        assert_eq!(stats.get("successes").and_then(|v| v.as_num()), Some(3.0));
+        assert_eq!(stats.get("failures").and_then(|v| v.as_num()), Some(4.0));
+        assert_eq!(stats.get("pat").and_then(|v| v.as_num()), Some(7.0));
+        assert_eq!(stats.get("keywords").and_then(|v| v.as_num()), Some(6.0));
+        assert!(stats.get("success").is_none());
+        assert!(stats.get("pats").is_none());
+        let dir = std::env::temp_dir().join(format!("dst-pet-save-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("pet.json");
+        let mut titled = save.clone();
+        titled.journal = r#"[{"at":1,"kind":"note","text":"Task-master and sk-not-a-key"}]"#.into();
+        store_file(&path, &titled).unwrap();
+        let loaded = load_file(&path);
+        assert_eq!(loaded.title, "Task-master");
+        assert!(loaded.journal.contains("Task-master"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn import_rejects_an_oversized_file_and_backup_keeps_the_old_save() {
+        assert!(reject_oversized(200_001).is_err());
+        assert!(reject_oversized(200_000).is_ok());
+        let dir = std::env::temp_dir().join(format!("dst-pet-bak-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("pet.json");
+        std::fs::write(&path, "old").unwrap();
+        let bak = backup_save(&path).unwrap().unwrap();
+        assert_eq!(std::fs::read_to_string(bak).unwrap(), "old");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

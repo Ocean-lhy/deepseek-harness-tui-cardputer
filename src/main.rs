@@ -169,6 +169,10 @@ pub struct Scr {
     on_tick: Option<Box<dyn FnMut(&mut Scr)>>,
     /// Whale-girl session. Absent in unit tests that build a bare screen.
     pet: Option<pet_ui::PetHandle>,
+    /// Portrait pixels were cleared for a full-screen layer.
+    pet_hidden: std::cell::Cell<bool>,
+    /// The next normal draw must erase dock cells a menu wrote.
+    pet_scrub: std::cell::Cell<bool>,
 }
 
 /// One recorded tool call for the CtrlO viewer: the expanded arguments and the
@@ -384,16 +388,25 @@ impl Scr {
             hist_draft: String::new(),
             on_tick: None,
             pet: None,
+            pet_hidden: std::cell::Cell::new(false),
+            pet_scrub: std::cell::Cell::new(false),
         }
     }
 
+    /// The idle room is only the untouched opening splash. A command or a
+    /// conversation leaves it, so the room picture cannot cover that text.
+    fn idle_splash_only(&self) -> bool {
+        self.art_on && !self.splash_done && self.lines.len() == art::ART_ROWS + 1
+    }
+
     /// Columns the transcript may use. 0 from the pet means "no dock".
+    /// The panel is 53 cells even when the pty reports fewer: a 49-column
+    /// probe used to wrap the dock at 39.
     fn dock_columns(&self) -> usize {
-        let full = self.cols.min(PANEL_COLS);
         let Some(pet) = &self.pet else { return 0 };
         let mut host = pet.borrow_mut();
-        host.follow(self.art_on && !self.splash_done);
-        host.dock_width(full)
+        host.follow(self.idle_splash_only());
+        host.dock_width(PANEL_COLS)
     }
 
     fn transcript_width(&self) -> usize {
@@ -403,15 +416,18 @@ impl Scr {
 
     /// Finish a row. Dock rows are padded to the text width and not cleared
     /// to the edge, so the framebuffer pet in columns 43–52 is left alone.
-    fn end_row(&self, s: &mut String, text: &str, dock_w: usize) {
-        if dock_w > 0 {
+    /// `scrub` clears those cells once after a full-screen layer, before the
+    /// portrait is painted back.
+    fn end_row(&self, s: &mut String, text: &str, dock_w: usize, scrub: bool) {
+        if dock_w > 0 && !scrub {
             let fitted = fit(text, dock_w);
             let pad = dock_w.saturating_sub(dw(&fitted));
             s.push_str(&fitted);
             s.push_str(&" ".repeat(pad));
             s.push_str("\x1b[0m\r\n");
         } else {
-            s.push_str(text);
+            let shown = if dock_w > 0 { fit(text, dock_w) } else { text.to_string() };
+            s.push_str(&shown);
             s.push_str("\x1b[0m\x1b[K\r\n");
         }
     }
@@ -420,7 +436,7 @@ impl Scr {
     /// whale. Returns true when it drew a frame and the whale animation
     /// should stay put.
     fn pet_idle_frame(&mut self) -> bool {
-        if !self.art_on || self.splash_done || self.lines.len() < 9 {
+        if !self.idle_splash_only() {
             return false;
         }
         let Some(pet) = self.pet.clone() else { return false };
@@ -674,6 +690,17 @@ impl Scr {
     }
 
     fn draw(&self) {
+        let overlay = self.approval.is_some()
+            || self.ask.is_some()
+            || self.menu.is_some()
+            || self.qr.is_some()
+            || self.artifact.is_some();
+        if overlay && !self.pet_hidden.replace(true) {
+            if let Some(pet) = &self.pet {
+                pet.borrow_mut().conceal();
+            }
+            self.pet_scrub.set(true);
+        }
         if let Some(a) = &self.approval {
             self.draw_approval(a);
             return;
@@ -707,6 +734,8 @@ impl Scr {
             self.draw_artifact(a);
             return;
         }
+        let scrub = self.pet_scrub.replace(false);
+        self.pet_hidden.set(false);
         let mut s = String::with_capacity(4096);
         s.push_str("\x1b[?25l");
         s.push_str("\x1b[H");
@@ -718,7 +747,7 @@ impl Scr {
         if let Some(text) = &self.state_line {
             s.push_str("\x1b[1;35m");
             let width = if dock_w > 0 { dock_w } else { self.cols };
-            self.end_row(&mut s, &fit(&format!("{STATE_ICON} {text}"), width), dock_w);
+            self.end_row(&mut s, &fit(&format!("{STATE_ICON} {text}"), width), dock_w, scrub);
         }
 
         // Layout: [state(0/1)] + transcript + palette + live(1) + input(1).
@@ -759,13 +788,13 @@ impl Scr {
                     _ => s.push_str("\x1b[0m"),
                 }
                 if dock_w > 0 {
-                    self.end_row(&mut s, txt, dock_w);
+                    self.end_row(&mut s, txt, dock_w, scrub);
                     continue;
                 }
                 s.push_str(txt);
             }
             if dock_w > 0 {
-                self.end_row(&mut s, "", dock_w);
+                self.end_row(&mut s, "", dock_w, scrub);
             } else {
                 s.push_str("\x1b[0m\x1b[K\r\n");
             }
@@ -776,7 +805,7 @@ impl Scr {
             for line in self.think_lines.iter().skip(self.think_lines.len() - think_rows) {
                 s.push_str("\x1b[35m");
                 let width = if dock_w > 0 { dock_w } else { self.cols };
-                self.end_row(&mut s, &fit(line, width), dock_w);
+                self.end_row(&mut s, &fit(line, width), dock_w, scrub);
             }
         }
 
@@ -807,7 +836,7 @@ impl Scr {
                 s.push_str("\x1b[90m");
             }
             let width = if dock_w > 0 { dock_w } else { self.cols };
-            self.end_row(&mut s, &fit(&format!("{head}   {d}"), width), dock_w);
+            self.end_row(&mut s, &fit(&format!("{head}   {d}"), width), dock_w, scrub);
         }
 
         // ---- live line: thinking / streaming tail / queue depth ----
@@ -2788,6 +2817,95 @@ mod inline_tests {
     use super::{claim_terminal, strip_inline, tty_lock_name};
 
     #[test]
+    fn dock_text_wraps_at_43_even_when_the_pty_is_narrower() {
+        let mut scr = super::Scr::new();
+        scr.cols = 49;
+        scr.rows = 12;
+        scr.art_on = false;
+        scr.splash_done = true;
+        scr.pet = Some(std::rc::Rc::new(std::cell::RefCell::new(
+            crate::pet_ui::pixel_dock_for_test(),
+        )));
+        let forty_three: String = "x".repeat(43);
+        scr.push(&forty_three, super::K_NORM);
+        let last = scr.lines.last().map(|(t, _)| t.clone()).unwrap_or_default();
+        assert_eq!(last.chars().count(), 43, "wrapped to {last:?}");
+        scr.push(&"y".repeat(44), super::K_NORM);
+        let widths: Vec<usize> = scr.lines.iter().rev().take(2).map(|(t, _)| t.chars().count()).collect();
+        assert_eq!(widths, vec![1, 43], "44 cells must break after 43, got {widths:?}");
+    }
+
+    #[test]
+    fn a_command_leaves_the_idle_room_so_the_text_stays() {
+        let mut scr = super::Scr::new();
+        scr.art_on = true;
+        scr.splash_done = false;
+        scr.rows = 12;
+        scr.cols = 53;
+        scr.lines = vec![("splash".into(), super::K_ART); super::art::ART_ROWS + 1];
+        scr.lines.push(("command output that must stay".into(), super::K_NORM));
+        scr.pet = Some(std::rc::Rc::new(std::cell::RefCell::new(
+            crate::pet_ui::pixel_dock_for_test(),
+        )));
+        assert!(!scr.pet_idle_frame());
+        assert_eq!(scr.lines[0].0, "splash");
+        assert_eq!(scr.lines.last().unwrap().0, "command output that must stay");
+    }
+
+    #[test]
+    fn an_overlay_conceals_the_pet_and_the_next_frame_paints_it() {
+        let ppm = std::env::temp_dir().join(format!(
+            "dst-pet-overlay-{}-{}.ppm",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let mut host = crate::pet_ui::pixel_dock_for_test();
+        crate::pet_ui::set_out_for_test(&mut host, ppm.clone());
+        let mut scr = super::Scr::new();
+        scr.rows = 12;
+        scr.cols = 53;
+        scr.art_on = false;
+        scr.splash_done = true;
+        scr.pet = Some(std::rc::Rc::new(std::cell::RefCell::new(host)));
+        scr.draw();
+        let shown = std::fs::read(&ppm).unwrap();
+        let shown = crate::pet_art::decode_ppm(&shown).unwrap();
+        assert!(
+            shown.rgb.chunks(3).any(|p| p != crate::pet_art::KEY),
+            "the dock frame should paint the pet before a menu covers it"
+        );
+        scr.menu = Some(super::Menu {
+            title: "help".into(),
+            items: vec![super::MenuItem { label: "pet".into(), value: String::new() }],
+            sel: 0,
+            hint: String::new(),
+            preview: None,
+        });
+        scr.draw();
+        let hidden = crate::pet_art::decode_ppm(&std::fs::read(&ppm).unwrap()).unwrap();
+        assert!(
+            hidden.rgb.chunks(3).all(|p| p == crate::pet_art::KEY),
+            "a full-screen menu must conceal the pet, not leave it on top"
+        );
+        assert!(scr.pet_scrub.get());
+        scr.menu = None;
+        let mut scrubbed = String::new();
+        scr.end_row(&mut scrubbed, "back", 43, true);
+        assert!(scrubbed.contains("\x1b[K"), "closing the layer clears the old pet cells once");
+        let mut kept = String::new();
+        scr.end_row(&mut kept, "back", 43, false);
+        assert!(!kept.contains("\x1b[K"), "later dock rows leave the portrait cells alone");
+        scr.draw();
+        assert!(!scr.pet_scrub.get());
+        let back = crate::pet_art::decode_ppm(&std::fs::read(&ppm).unwrap()).unwrap();
+        assert!(back.rgb.chunks(3).any(|p| p != crate::pet_art::KEY));
+        let _ = std::fs::remove_file(&ppm);
+    }
+
+    #[test]
     fn the_prompt_teaches_planning_and_per_step_reports() {
         // The model was rarely calling todo_write/state_report: both must be
         // spelled out in the prompt, aligned with DSH's todo contract.
@@ -3568,6 +3686,11 @@ fn pet_note(scr: &mut Scr, ev: pet::Ev) {
         let name = pet_growth::achievement_name(&id);
         scr.push(&i18n::tf("pet_ach", &[&format!("{id} {name}")]), K_DIM);
     }
+    let err = pet.borrow().last_save_error.clone();
+    if !err.is_empty() {
+        pet.borrow_mut().last_save_error.clear();
+        scr.push(&i18n::tf("pet_save_bad", &[&err]), K_ERR);
+    }
 }
 
 fn apply_pet(scr: &mut Scr, cfg: &mut config::Config, arg: &str) {
@@ -3670,6 +3793,8 @@ impl<'a> harness::Ui for TermUi<'a> {
             Ev::ThinkingDelta(t) => {
                 pet_note(self.scr, pet::Ev::Thinking);
                 // Wrap incrementally: only the new characters are measured.
+                // The two-cell indent is part of the row. With the dock open
+                // that row is 43 cells, so the words wrap at 41.
                 let wrap_cols = if self.scr.dock_columns() > 0 {
                     self.scr.transcript_width().saturating_sub(2)
                 } else {
@@ -3749,13 +3874,25 @@ impl<'a> harness::Ui for TermUi<'a> {
                 // about to take over the whole screen, so only its title is
                 // worth a card line.
                 self.scr.push(&format!("* {name}"), K_TOOL);
-                let cols = self.scr.cols;
+                let shown = if self.scr.dock_columns() > 0 {
+                    self.scr.transcript_width()
+                } else {
+                    self.scr.cols
+                };
                 if name == "artifact" {
                     if !title.is_empty() {
-                        self.scr.push(&fit(&format!("  {title}"), cols), K_DIM);
+                        self.scr.push(&fit(&format!("  {title}"), shown), K_DIM);
                     }
                 } else {
-                    for line in expand_args(&args, cols, 5) {
+                    // expand_args keeps one spare cell. With the dock open,
+                    // pass 44 so the card fills the 43-column text. Without
+                    // a dock, pass the pty width and the spare cell stays.
+                    let arg_width = if self.scr.dock_columns() > 0 {
+                        shown.saturating_add(1)
+                    } else {
+                        shown
+                    };
+                    for line in expand_args(&args, arg_width, 5) {
                         self.scr.push(&line, K_DIM);
                     }
                 }
@@ -3797,7 +3934,11 @@ impl<'a> harness::Ui for TermUi<'a> {
                     is_error,
                     secs: took,
                 });
-                let cols = self.scr.cols;
+                let cols = if self.scr.dock_columns() > 0 {
+                    self.scr.transcript_width()
+                } else {
+                    self.scr.cols
+                };
                 // When sibling tools are still running in parallel, tag the
                 // settled line with the tool name so out-of-order completion
                 // stays readable on the 53-col panel.
@@ -3850,8 +3991,13 @@ impl<'a> harness::Ui for TermUi<'a> {
                 }
             }
             Ev::StateReport(t) => self.scr.set_state(t),
-            Ev::TurnEnd { .. } => {
-                pet_note(self.scr, pet::Ev::TurnEnd);
+            Ev::TurnEnd { fate, .. } => {
+                let end = match fate {
+                    harness::TurnFate::Failed => pet::End::Failed,
+                    harness::TurnFate::Cancelled => pet::End::Cancelled,
+                    harness::TurnFate::Done => pet::End::Done,
+                };
+                pet_note(self.scr, pet::Ev::TurnEnd(end));
                 self.scr.flush_state();
                 self.scr.draw();
             }
@@ -8321,6 +8467,9 @@ start another one in a different terminal or tmux window"
     }
     crate::bg::shutdown();
     crate::mcp::shutdown();
+    if let Some(pet) = &scr.pet {
+        pet.borrow_mut().conceal();
+    }
     raw_mode(false);
     let _ = std::io::stdout().write_all(b"\x1b[0m\x1b[2J\x1b[H");
     println!("bye");

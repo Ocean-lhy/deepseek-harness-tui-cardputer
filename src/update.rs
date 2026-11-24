@@ -327,6 +327,10 @@ pub fn enabled() -> bool {
     if std::env::var("DST_NO_UPDATE_CHECK").map(|v| v == "1").unwrap_or(false) {
         return false;
     }
+    // A temporary trial binary must not offer to replace itself.
+    if std::env::var("DST_PET_TRIAL").map(|v| v == "1").unwrap_or(false) {
+        return false;
+    }
     !cfg!(debug_assertions)
         || std::env::var("DST_UPDATE_FORCE")
             .map(|v| v == "1")

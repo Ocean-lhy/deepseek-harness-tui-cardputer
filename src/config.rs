@@ -312,7 +312,7 @@ pub fn mock_asr_text() -> String {
 }
 
 pub fn home() -> PathBuf {
-    let h = std::env::var("HOME").unwrap_or_else(|_| "/home/hanxiao".into());
+    let h = std::env::var("HOME").unwrap_or_else(|_| std::env::temp_dir().to_string_lossy().into_owned());
     PathBuf::from(h).join(".dst")
 }
 
@@ -320,7 +320,7 @@ pub fn home() -> PathBuf {
 pub fn expand(path: &str) -> PathBuf {
     let p = path.trim();
     if let Some(rest) = p.strip_prefix("~/") {
-        let h = std::env::var("HOME").unwrap_or_else(|_| "/home/hanxiao".into());
+        let h = std::env::var("HOME").unwrap_or_else(|_| std::env::temp_dir().to_string_lossy().into_owned());
         return PathBuf::from(h).join(rest);
     }
     if p == "~" {
@@ -459,7 +459,7 @@ pub fn list_sessions() -> Vec<(PathBuf, String, u64)> {
 
 /// Create the `~/.dst` tree with private permissions on the secret file.
 fn legacy_dir() -> PathBuf {
-    let h = std::env::var("HOME").unwrap_or_else(|_| "/home/hanxiao".into());
+    let h = std::env::var("HOME").unwrap_or_else(|_| std::env::temp_dir().to_string_lossy().into_owned());
     PathBuf::from(h).join(".config").join("dsh-lite")
 }
 
